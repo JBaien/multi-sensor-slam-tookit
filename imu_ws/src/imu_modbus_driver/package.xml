@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>imu_modbus_driver</name>
+  <version>0.0.0</version>
+  <description>IMU Modbus driver with EKF attitude estimation</description>
+
+  <maintainer email="you@todo.todo">Your Name</maintainer>
+  <license>BSD</license>
+
+  <!-- 依赖 -->
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <!-- 构建依赖 -->
+  <build_depend>roscpp</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>nav_msgs</build_depend>
+  <build_depend>tf</build_depend>
+  <build_depend>tf2</build_depend>
+  <build_depend>tf2_ros</build_depend>
+
+  <!-- 运行依赖 -->
+  <exec_depend>roscpp</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>tf</exec_depend>
+  <exec_depend>tf2</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+
+  <!-- 系统依赖 -->
+  <depend>libmodbus</depend>
+
+</package>
+
