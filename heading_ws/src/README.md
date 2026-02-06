@@ -275,37 +275,4 @@ rosservice call /heading_estimation_node/set_logger_level ros.heading_estimation
 rosservice call /heading_estimation_node/set_logger_level ros.heading_estimation_node warn
 ```
 
-## 扩展开发
-
-### 添加自定义参数
-
-1. 在 `HeadingConfig` 结构中添加参数
-2. 在 `loadFromROS` 方法中加载参数
-3. 在launch文件或yaml配置文件中设置
-
-### 集成到现有系统
-
-1. 确保TF树中存在 `base_frame` 和 `lidar_frame`
-2. 修改 `forward_axis` 匹配实际车辆朝向
-3. 根据实际尺寸调整 `sample_front_dist` 和 `sample_back_dist`
-
-## 许可证
-
-MIT License
-
-## 贡献
-
-欢迎提交Issue和Pull Request。
-
-## 联系方式
-
-如有问题或建议，请联系开发团队。
-
-## 更新日志
-
-### v1.0.0 (2026-02-04)
-- 初始版本发布
-- 实现完整的单激光雷达姿态与墙距估计算法
-- 支持工程化落地
-
 rosrun tf static_transform_publisher 0 0 0 0 0 0 timoo world 100
