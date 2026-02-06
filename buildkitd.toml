@@ -1,0 +1,5 @@
+[registry."docker.io"]
+http_proxy="http://192.168.188.232:7890"
+https_proxy="http://192.168.188.232:7890"
+insecure_skip_verify = true   # 可选，如果代理有 HTTPS 问题
+
