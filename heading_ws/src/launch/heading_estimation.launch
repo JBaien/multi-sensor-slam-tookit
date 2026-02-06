@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Configuration file path -->
+  <arg name="config_file" default="$(find heading_estimation)/config/default_params.yaml" />
+
+  <!-- Override parameters via command line (optional) -->
+  <arg name="pointcloud_topic" default="" />
+  <arg name="base_frame" default="" />
+  <arg name="lidar_frame" default="" />
+  <arg name="forward_axis" default="" />
+
+  <!-- Forward axis options: +X, -X, +Y, -Y -->
+  <!-- +X: forward direction is +X axis -->
+  <!-- -X: forward direction is -X axis -->
+  <!-- +Y: forward direction is +Y axis -->
+  <!-- -Y: forward direction is -Y axis -->
+
+  <!-- Heading Estimation Node -->
+  <node pkg="heading_estimation"
+        type="heading_estimation_node"
+        name="heading_estimation_node"
+        output="screen">
+
+    <!-- Load configuration from YAML file -->
+    <rosparam file="$(arg config_file)" command="load" />
+
+    <!-- Override parameters if launch args are provided (non-empty) -->
+    <param if="$(eval pointcloud_topic != '')" name="pointcloud_topic" value="$(arg pointcloud_topic)" />
+    <param if="$(eval base_frame != '')" name="base_frame" value="$(arg base_frame)" />
+    <param if="$(eval lidar_frame != '')" name="lidar_frame" value="$(arg lidar_frame)" />
+    <param if="$(eval forward_axis != '')" name="forward_axis" value="$(arg forward_axis)" />
+
+  </node>
+
+  <!-- Optional: Publish static transform if not using external TF -->
+  <!-- Uncomment and adjust if lidar_frame != base_frame -->
+  <!--
+  <node pkg="tf" type="static_transform_publisher"
+        name="lidar_to_base_link"
+        args="0 0 0.5 0 0 0 $(arg lidar_frame) $(arg base_frame) 100" />
+  -->
+
+</launch>
