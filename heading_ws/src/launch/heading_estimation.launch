@@ -1,5 +1,8 @@
 <?xml version="1.0"?>
 <launch>
+  <!-- Set locale for Chinese character display -->
+  <env name="LC_ALL" value="zh_CN.UTF-8" />
+
   <!-- Configuration file path -->
   <arg name="config_file" default="$(find heading_estimation)/config/default_params.yaml" />
 

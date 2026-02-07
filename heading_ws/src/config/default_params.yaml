@@ -24,21 +24,32 @@ sample_front_dist: 0.5   # 中心前方0.5米
 sample_back_dist: -0.5    # 中心后方0.5米
 
 # 地面平面估计参数
-ground_roi_radius: 10.0          # 地面拟合ROI半径（米）
-ground_z_percentile: 0.2        # 选择地面点的高度分位数
-ground_inlier_min: 50           # 有效地面的最小内点数
+ground_roi_radius: 5              # 地面拟合ROI半径（米）
+ground_z_percentile: 0.3         # 选择地面点的高度分位数
+ground_inlier_min: 30            # 有效地面的最小内点数
 ground_normal_threshold: 5.0     # 法向与水平的最大偏差（度）
+ground_ransac_max_iter: 500      # 地面RANSAC最大迭代次数
+ground_ransac_threshold: 0.08    # 地面RANSAC内点距离阈值（米）
+plane_inlier_threshold: 0.08     # 平面提取的内点距离阈值（米）
 
 # 墙面平面估计参数
 wall_z_min: 0.5                  # 墙面提取的最小高度（米）
-wall_z_max: 3.0                  # 墙面提取的最大高度（米）
-wall_inlier_min: 300             # 有效墙面的最小内点数
+wall_z_max: 3                    # 墙面提取的最大高度（米）
+wall_z_percentile_min: 0.2       # 墙面提取的最小高度分位数（去除底部20%的最低点）
+wall_z_percentile_max: 0.8       # 墙面提取的最大高度分位数（去除顶部20%的最高点）
+wall_use_percentile_filter: true  # 是否使用分位数高度滤波（true:使用分位数, false:使用绝对高度值）
+wall_inlier_min: 50             # 有效墙面的最小内点数
 wall_vertical_threshold: 0.2     # 垂直平面的最大|n_z|（余弦阈值）
 wall_parallel_cos: 0.9           # 平行墙验证的余弦阈值
+wall_max_planes: 4               # 最大拟合墙面数量（用于筛选左右墙）
+wall_side_cos_threshold: 0.3      # 判断是否为左右墙的余弦阈值（与前进轴的点积绝对值小于此值即为左右墙）
+wall_ransac_max_iter: 300        # 墙面RANSAC最大迭代次数
+wall_ransac_threshold: 0.05      # 墙面RANSAC内点距离阈值（米）
+wall_distance_max: 100.0         # 墙距计算的最大有效距离（米）
 
 # 滤波参数
-voxel_size: 0.05                 # 体素网格滤波尺寸（米）
-outlier_mean_k: 30               # 统计离群点移除的邻居数量
+voxel_size: 0.06                 # 体素网格滤波尺寸（米，从0.02提高到0.06避免整数溢出）
+outlier_mean_k: 50               # 统计离群点移除的邻居数量
 outlier_std_mul: 1.5             # 离群点移除的标准差倍数
 
 # 时域平滑参数
