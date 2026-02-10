@@ -20,15 +20,15 @@ find_package(catkin REQUIRED COMPONENTS
 
 # catkin 包配置 - 必须在 add_executable 之前
 catkin_package(
-  CATKIN_DEPENDS 
-    roscpp 
-    rospy 
-    std_msgs 
-    sensor_msgs 
+  CATKIN_DEPENDS
+    roscpp
+    rospy
+    std_msgs
+    sensor_msgs
     geometry_msgs
-    pcl_ros 
-    pcl_conversions 
-    tf 
+    pcl_ros
+    pcl_conversions
+    tf
     eigen_conversions
 )
 

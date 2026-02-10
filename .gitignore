@@ -29,3 +29,7 @@ sync_ws/devel/
 timoo/build/
 timoo/devel/
 zlout.bag
+tmlidar_ws/build/
+tmlidar_ws/devel/
+tmlidar_ws/src/.vscode/settings.json
+ros-app.tar.gz
