@@ -1,0 +1,13 @@
+debug = true
+
+[dns]
+  nameservers = ["8.8.8.8", "8.8.4.4", "114.114.114.114"]
+
+[worker.oci]
+  gc = true
+
+# ===== 可选：只有当你有“Docker Hub 镜像站/代理仓库”时才开启 =====
+# [registry."docker.io"]
+#   mirrors = ["mirror.gcr.io"]   # 举例：Docker 文档示例
+#   http = false                 # 镜像站是 http 才设 true
+#   insecure = false             # 镜像站是自签 https 才设 true
