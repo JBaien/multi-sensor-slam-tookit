@@ -1,3 +1,6 @@
+include_directories(/usr/include)
+include_directories(/usr/local/include)
+
 add_library(timoo_input input.cc)
 target_link_libraries(timoo_input
   ${catkin_LIBRARIES}
