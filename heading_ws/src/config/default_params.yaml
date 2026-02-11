@@ -3,7 +3,7 @@
 
 # 输入/输出话题
 pointcloud_topic: "/timoo_points"
-base_frame: "world"
+base_frame: "timoo"
 lidar_frame: "timoo"
 attitude_topic: "/pose_wall/attitude"
 distances_topic: "/pose_wall/distances"
