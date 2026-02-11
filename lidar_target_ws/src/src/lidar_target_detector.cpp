@@ -19,6 +19,7 @@
 // ====== TCP/Modbus 相关修复所需(仅 TCP 层使用)======
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/tcp.h>
 #include <sys/select.h>
 
 namespace {
@@ -41,13 +42,12 @@ static bool sendAll(int fd, const uint8_t* data, size_t len)
             eagain_tries = 0;
             continue;
         }
-        if (n < 0 && (errno == EINTR)) {
+        if (n < 0 && errno == EINTR) {
             continue;
         }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            // 非阻塞短暂不可写:认为连接异常,直接失败让上层关闭
-            // 修复:等待可写后继续发送,避免误断链导致"几秒才更新"
-            if (++eagain_tries > 20) { // 最多等待约 1 秒
+            // 非阻塞短暂不可写:等待可写后继续发送
+            if (++eagain_tries > 500) { // 最多等待约 10 秒 (500 * 20ms)
                 return false;
             }
             fd_set wfds;
@@ -55,15 +55,21 @@ static bool sendAll(int fd, const uint8_t* data, size_t len)
             FD_SET(fd, &wfds);
             struct timeval tv;
             tv.tv_sec = 0;
-            tv.tv_usec = 50 * 1000; // 50ms
+            tv.tv_usec = 20 * 1000; // 20ms
             int r = select(fd + 1, nullptr, &wfds, nullptr, &tv);
             if (r > 0) {
+                // socket 可写，重试发送
                 continue;
-            }
-            if (r < 0 && errno == EINTR) {
+            } else if (r == 0) {
+                // select 超时，继续等待
                 continue;
+            } else if (r < 0 && errno == EINTR) {
+                // 被信号中断，继续等待
+                continue;
+            } else {
+                // select 出错
+                return false;
             }
-            continue;
         }
         return false;
     }
@@ -83,12 +89,12 @@ LidarTargetDetector::LidarTargetDetector(ros::NodeHandle& nh,
     : nh_(nh),
       private_nh_(private_nh),
       tcp_server_fd_(-1),
-      tcp_client_fd_(-1),
       tcp_port_(5050),
       tcp_server_running_(false),
       heartbeat_(0)
 {
     // 从参数服务器获取算法参数
+    private_nh_.param("tcp_port", tcp_port_, 5050); // Modbus TCP 端口
     private_nh_.param("intensity_threshold", intensity_threshold_,
                       100.0); // 反射强度阈值
     private_nh_.param("cluster_tolerance", cluster_tolerance_,
@@ -139,6 +145,7 @@ LidarTargetDetector::LidarTargetDetector(ros::NodeHandle& nh,
 
     // 输出初始化信息
     ROS_INFO("Lidar Target Detector initialized with parameters:");
+    ROS_INFO("  TCP Port: %d", tcp_port_);
     ROS_INFO("  Intensity threshold: %.1f", intensity_threshold_);
     ROS_INFO("  Cluster tolerance: %.3f m", cluster_tolerance_);
     ROS_INFO("  Min/Max cluster size: %d/%d", min_cluster_size_,
@@ -631,6 +638,18 @@ bool LidarTargetDetector::initTCPServer()
         return false;
     }
 
+    // 增加 TCP 缓冲区大小以支持高频连接
+    int send_buf_size = 512 * 1024; // 512KB
+    int recv_buf_size = 512 * 1024; // 512KB
+    setsockopt(tcp_server_fd_, SOL_SOCKET, SO_SNDBUF, &send_buf_size,
+               sizeof(send_buf_size));
+    setsockopt(tcp_server_fd_, SOL_SOCKET, SO_RCVBUF, &recv_buf_size,
+               sizeof(recv_buf_size));
+
+    // 禁用 Nagle 算法，立即发送小数据包（对 Modbus 这种短协议很重要）
+    int flag = 1;
+    setsockopt(tcp_server_fd_, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+
     // 绑定地址和端口
     struct sockaddr_in server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
@@ -672,11 +691,13 @@ void LidarTargetDetector::closeTCPServer()
 
     {
         std::lock_guard<std::mutex> lock(tcp_mutex_);
-        if (tcp_client_fd_ >= 0) {
-            shutdown(tcp_client_fd_, SHUT_RDWR);
-            close(tcp_client_fd_);
-            tcp_client_fd_ = -1;
+        // 关闭所有客户端连接
+        for (int fd : tcp_client_fds_) {
+            shutdown(fd, SHUT_RDWR);
+            close(fd);
         }
+        tcp_client_fds_.clear();
+        client_rx_caches_.clear();
     }
 
     if (tcp_server_fd_ >= 0) {
@@ -698,14 +719,10 @@ void LidarTargetDetector::tcpServerThread()
     ROS_INFO("TCP server thread started, waiting for connections on port %d",
              tcp_port_);
 
-    // Modbus TCP 粘包/半包处理缓存(仅 TCP 层)
-    std::vector<uint8_t> rx_cache;
-    rx_cache.reserve(1024);
-
     while (tcp_server_running_) {
         // 设置socket为非阻塞模式,以便能够检查tcp_server_running_
         struct timeval tv;
-        tv.tv_sec = 1;
+        tv.tv_sec = 2;
         tv.tv_usec = 0;
 
         fd_set read_fds;
@@ -713,15 +730,17 @@ void LidarTargetDetector::tcpServerThread()
         FD_SET(tcp_server_fd_, &read_fds);
         int max_fd = tcp_server_fd_;
 
-        int client_fd_snapshot = -1;
+        // 获取当前所有客户端 fd（需要加锁）
+        std::vector<int> client_fds_copy;
         {
             std::lock_guard<std::mutex> lock(tcp_mutex_);
-            client_fd_snapshot = tcp_client_fd_;
+            client_fds_copy = tcp_client_fds_;
         }
 
-        if (client_fd_snapshot >= 0) {
-            FD_SET(client_fd_snapshot, &read_fds);
-            if (client_fd_snapshot > max_fd) max_fd = client_fd_snapshot;
+        // 将所有客户端加入 select 监听
+        for (int fd : client_fds_copy) {
+            FD_SET(fd, &read_fds);
+            if (fd > max_fd) max_fd = fd;
         }
 
         int ret = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
@@ -749,94 +768,124 @@ void LidarTargetDetector::tcpServerThread()
                              strerror(errno));
                 }
             } else {
-                // 设置 client socket 非阻塞(仅 TCP 层)
+                // 设置 client socket 非阻塞
                 setNonBlocking(client_fd);
 
-                // 关闭之前的客户端连接(如果存在)
-                std::lock_guard<std::mutex> lock(tcp_mutex_);
-                if (tcp_client_fd_ >= 0) {
-                    close(tcp_client_fd_);
-                }
-                tcp_client_fd_ = client_fd;
+                // 增加 TCP 缓冲区大小以支持高频请求
+                int send_buf_size = 256 * 1024; // 256KB
+                int recv_buf_size = 256 * 1024; // 256KB
+                setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &send_buf_size,
+                           sizeof(send_buf_size));
+                setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &recv_buf_size,
+                           sizeof(recv_buf_size));
 
-                // 设置接收超时 (5秒,避免长时间阻塞)
-                tv.tv_sec = 5;
+                // 禁用 Nagle 算法，立即发送小数据包（对 Modbus
+                // 这种短协议很重要）
+                int flag = 1;
+                setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag,
+                           sizeof(flag));
+
+                // 设置接收/发送超时 (10秒,支持高频请求)
+                tv.tv_sec = 10;
                 tv.tv_usec = 0;
                 setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-                // 新客户端连接,清空缓存(仅 TCP 层)
-                rx_cache.clear();
+                // 新客户端连接,添加到客户端列表
+                {
+                    std::lock_guard<std::mutex> lock(tcp_mutex_);
+                    tcp_client_fds_.push_back(client_fd);
+                    // 初始化该客户端的接收缓存
+                    client_rx_caches_[client_fd].clear();
+                }
 
                 char client_ip[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &client_addr.sin_addr, client_ip,
                           INET_ADDRSTRLEN);
-                ROS_INFO("TCP client connected from %s:%d", client_ip,
-                         ntohs(client_addr.sin_port));
+                ROS_INFO(
+                    "TCP client connected from %s:%d (socket buffer: 256KB, "
+                    "TCP_NODELAY enabled), total clients: %zu",
+                    client_ip, ntohs(client_addr.sin_port),
+                    tcp_client_fds_.size());
             }
         }
 
-        // 处理客户端请求
-        client_fd_snapshot = -1;
-        {
-            std::lock_guard<std::mutex> lock(tcp_mutex_);
-            client_fd_snapshot = tcp_client_fd_;
-        }
+        // 处理每个有数据的客户端
+        for (int client_fd : client_fds_copy) {
+            if (FD_ISSET(client_fd, &read_fds)) {
+                uint8_t buffer[256];
+                ssize_t recv_len = recv(client_fd, buffer, sizeof(buffer), 0);
 
-        if (client_fd_snapshot >= 0 &&
-            FD_ISSET(client_fd_snapshot, &read_fds)) {
-            uint8_t buffer[256];
-            ssize_t recv_len =
-                recv(client_fd_snapshot, buffer, sizeof(buffer), 0);
+                if (recv_len > 0) {
+                    // TCP 层:追加到缓存,做 Modbus TCP 组帧(解决半包/粘包)
+                    auto& rx_cache = client_rx_caches_[client_fd];
+                    rx_cache.insert(rx_cache.end(), buffer, buffer + recv_len);
 
-            if (recv_len > 0) {
-                // TCP 层:追加到缓存,做 Modbus TCP 组帧(解决半包/粘包)
-                rx_cache.insert(rx_cache.end(), buffer, buffer + recv_len);
+                    // Modbus TCP: total_len = 6 + length_field
+                    while (true) {
+                        if (rx_cache.size() < 6) break;
 
-                // Modbus TCP: total_len = 6 + length_field
-                while (true) {
-                    if (rx_cache.size() < 6) break;
+                        uint16_t protocol_id = (rx_cache[2] << 8) | rx_cache[3];
+                        uint16_t length_field =
+                            (rx_cache[4] << 8) | rx_cache[5];
 
-                    uint16_t protocol_id = (rx_cache[2] << 8) | rx_cache[3];
-                    uint16_t length_field = (rx_cache[4] << 8) | rx_cache[5];
+                        if (protocol_id != 0) {
+                            // 非法数据流,丢 1 字节尝试重同步
+                            rx_cache.erase(rx_cache.begin());
+                            continue;
+                        }
 
-                    if (protocol_id != 0) {
-                        // 非法数据流,丢 1 字节尝试重同步
-                        rx_cache.erase(rx_cache.begin());
-                        continue;
+                        // length_field 合理范围:至少 unit(1)+func(1)=2,最大 253
+                        if (length_field < 2 || length_field > 253) {
+                            rx_cache.erase(rx_cache.begin());
+                            continue;
+                        }
+
+                        size_t total = 6 + static_cast<size_t>(length_field);
+                        if (rx_cache.size() < total) break;
+
+                        std::vector<uint8_t> frame(rx_cache.begin(),
+                                                   rx_cache.begin() + total);
+                        rx_cache.erase(rx_cache.begin(),
+                                       rx_cache.begin() + total);
+
+                        // 处理Modbus请求(此时保证是一整帧),传入 client_fd
+                        handleModbusRequest(client_fd, frame.data(),
+                                            static_cast<ssize_t>(frame.size()));
                     }
-
-                    // length_field 合理范围:至少 unit(1)+func(1)=2,最大 253
-                    if (length_field < 2 || length_field > 253) {
-                        rx_cache.erase(rx_cache.begin());
-                        continue;
+                } else if (recv_len == 0) {
+                    // 客户端正常断开
+                    {
+                        std::lock_guard<std::mutex> lock(tcp_mutex_);
+                        // 从列表中移除
+                        auto it = std::find(tcp_client_fds_.begin(),
+                                            tcp_client_fds_.end(), client_fd);
+                        if (it != tcp_client_fds_.end()) {
+                            tcp_client_fds_.erase(it);
+                        }
+                        client_rx_caches_.erase(client_fd);
                     }
-
-                    size_t total = 6 + static_cast<size_t>(length_field);
-                    if (rx_cache.size() < total) break;
-
-                    std::vector<uint8_t> frame(rx_cache.begin(),
-                                               rx_cache.begin() + total);
-                    rx_cache.erase(rx_cache.begin(), rx_cache.begin() + total);
-
-                    // 处理Modbus请求(此时保证是一整帧)
-                    handleModbusRequest(frame.data(),
-                                        static_cast<ssize_t>(frame.size()));
+                    close(client_fd);
+                    ROS_WARN(
+                        "TCP client disconnected (fd=%d), total clients: %zu",
+                        client_fd, tcp_client_fds_.size());
+                } else if (recv_len < 0 && errno != EAGAIN &&
+                           errno != EWOULDBLOCK) {
+                    // 错误导致断开
+                    {
+                        std::lock_guard<std::mutex> lock(tcp_mutex_);
+                        auto it = std::find(tcp_client_fds_.begin(),
+                                            tcp_client_fds_.end(), client_fd);
+                        if (it != tcp_client_fds_.end()) {
+                            tcp_client_fds_.erase(it);
+                        }
+                        client_rx_caches_.erase(client_fd);
+                    }
+                    close(client_fd);
+                    ROS_WARN("TCP client error (fd=%d): %s, total clients: %zu",
+                             client_fd, strerror(errno),
+                             tcp_client_fds_.size());
                 }
-            } else if (recv_len == 0) {
-                // 错误或客户端断开
-                std::lock_guard<std::mutex> lock(tcp_mutex_);
-                close(tcp_client_fd_);
-                tcp_client_fd_ = -1;
-                rx_cache.clear();
-                ROS_WARN("TCP client disconnected");
-            } else if (recv_len < 0 && errno != EAGAIN &&
-                       errno != EWOULDBLOCK) {
-                // 错误或客户端断开
-                std::lock_guard<std::mutex> lock(tcp_mutex_);
-                close(tcp_client_fd_);
-                tcp_client_fd_ = -1;
-                rx_cache.clear();
-                ROS_WARN("TCP client disconnected");
             }
         }
     }
@@ -868,10 +917,12 @@ void LidarTargetDetector::sendTCPData(
 
 /**
  * @brief 处理Modbus TCP请求
+ * @param client_fd 客户端socket描述符
  * @param request Modbus请求数据
  * @param length 请求数据长度
  */
-void LidarTargetDetector::handleModbusRequest(uint8_t* request, ssize_t length)
+void LidarTargetDetector::handleModbusRequest(int client_fd, uint8_t* request,
+                                              ssize_t length)
 {
     if (length < 8) {
         return; // Modbus TCP最小长度为8字节
@@ -883,6 +934,9 @@ void LidarTargetDetector::handleModbusRequest(uint8_t* request, ssize_t length)
     uint16_t length_field = (request[4] << 8) | request[5];
     uint8_t unit_id = request[6];
     uint8_t function_code = request[7];
+
+    ROS_DEBUG("Modbus request received (fd=%d): func=0x%02X, len=%zd",
+              client_fd, function_code, length);
 
     // 检查协议ID(Modbus TCP应该是0)
     if (protocol_id != 0) {
@@ -991,21 +1045,21 @@ void LidarTargetDetector::handleModbusRequest(uint8_t* request, ssize_t length)
     response[4] = ((response_len - 6) >> 8) & 0xFF;
     response[5] = (response_len - 6) & 0xFF;
 
-    // 发送响应
-    int fd_snapshot = -1;
-    {
-        std::lock_guard<std::mutex> lock(tcp_mutex_);
-        fd_snapshot = tcp_client_fd_;
-    }
-
-    if (fd_snapshot >= 0) {
+    // 发送响应给指定的客户端
+    if (client_fd >= 0) {
         bool ok =
-            sendAll(fd_snapshot, response, static_cast<size_t>(response_len));
+            sendAll(client_fd, response, static_cast<size_t>(response_len));
         if (!ok) {
-            ROS_WARN("Failed to send Modbus response: %s", strerror(errno));
+            ROS_WARN("Failed to send Modbus response (fd=%d, len=%zd): %s",
+                     client_fd, response_len, strerror(errno));
+            // 发送失败，关闭该客户端
             std::lock_guard<std::mutex> lock(tcp_mutex_);
-            close(tcp_client_fd_);
-            tcp_client_fd_ = -1;
+            auto it = std::find(tcp_client_fds_.begin(), tcp_client_fds_.end(),
+                                client_fd);
+            if (it != tcp_client_fds_.end()) {
+                tcp_client_fds_.erase(it);
+            }
+            close(client_fd);
         }
     }
 }

@@ -18,7 +18,7 @@
             to: 实际激光雷达发布的话题名称，需要根据具体设备修改
             说明：将节点内部的input_cloud话题重映射到实际的激光雷达话题
         -->
-        <remap from="input_cloud" to="/lidar_points" />
+        <remap from="input_cloud" to="/timoo_points" />
 
         <!--
             算法参数配置区域
@@ -51,6 +51,9 @@
 
         <!-- 最大目标半径：有效标靶的最大半径约束，单位：米 -->
         <param name="max_target_radius" type="double" value="0.5" />
+
+        <!-- TCP端口：Modbus TCP服务器监听端口，避免与其他服务冲突 -->
+        <param name="tcp_port" type="int" value="5050" />
     </node>
 
     <!--

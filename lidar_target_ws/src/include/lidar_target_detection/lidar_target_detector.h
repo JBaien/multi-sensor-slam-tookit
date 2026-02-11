@@ -24,6 +24,7 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 // 自定义点类型，包含XYZIRT信息
@@ -64,11 +65,12 @@ class LidarTargetDetector {
 
     // TCP服务器相关
     int tcp_server_fd_;
-    int tcp_client_fd_;
+    std::vector<int> tcp_client_fds_; // 支持多个客户端连接
     int tcp_port_;
     std::atomic<bool> tcp_server_running_;
     std::thread tcp_server_thread_;
     std::mutex tcp_mutex_;
+    std::unordered_map<int, std::vector<uint8_t>> client_rx_caches_; // 每个客户端的接收缓存
 
     // Modbus相关
     uint16_t modbus_registers_[100];  // Modbus寄存器数组
@@ -88,7 +90,7 @@ class LidarTargetDetector {
     void tcpServerThread();
     void sendTCPData(const geometry_msgs::PointStamped& position);
     void heartbeatThread();
-    void handleModbusRequest(uint8_t* request, ssize_t length);
+    void handleModbusRequest(int client_fd, uint8_t* request, ssize_t length);
 
     // 参数
     double intensity_threshold_;
