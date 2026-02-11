@@ -1,3 +1,4 @@
+
 # ============================================
 # Multi-Architecture Dockerfile for ROS Applications
 # Platform: Ubuntu 22.04 aarch64 (ARM64)
@@ -198,8 +199,8 @@ ARG NO_PROXY=localhost,127.0.0.1
 
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Shanghai \
-    LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8 \
+    LANG=zh_CN.UTF-8 \
+    LC_ALL=zh_CN.UTF-8 \
     ROS_DISTRO=noetic \
     CATKIN_WS=/opt/catkin_ws
 
@@ -208,7 +209,10 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # 替换为国内 APT 源（使用 HTTP 避免证书问题）
 RUN sed -i 's|http://ports.ubuntu.com/ubuntu-ports|http://mirrors.aliyun.com/ubuntu-ports|g' /etc/apt/sources.list && \
-    sed -i 's|https://mirrors.aliyun.com/ubuntu-ports|http://mirrors.aliyun.com/ubuntu-ports|g' /etc/apt/sources.list
+    sed -i 's|https://mirrors.aliyun.com/ubuntu-ports|http://mirrors.aliyun.com/ubuntu-ports|g' /etc/apt/sources.list || \
+    (echo "deb http://mirrors.aliyun.com/ubuntu-ports focal main restricted universe multiverse" > /etc/apt/sources.list && \
+     echo "deb http://mirrors.aliyun.com/ubuntu-ports focal-updates main restricted universe multiverse" >> /etc/apt/sources.list && \
+     echo "deb http://mirrors.aliyun.com/ubuntu-ports focal-security main restricted universe multiverse" >> /etc/apt/sources.list)
 
 # 配置 apt 忽略证书验证（由于代理可能干扰证书）
 RUN echo "Acquire::http::Proxy \"${HTTP_PROXY}\";" >> /etc/apt/apt.conf.d/proxy.conf && \
@@ -231,12 +235,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libvtk7-dev \
     python3 \
     python3-rosdep \
+    vim \
+    locales \
     && rm -rf /var/lib/apt/lists/*
 
+# 生成中文 locale
+RUN locale-gen zh_CN.UTF-8 && \
+    dpkg-reconfigure -f noninteractive locales && \
+    echo "=== Locale Configuration ===" && \
+    locale -a
+
 # 安装ROS Noetic运行时（使用国内镜像加速）
-RUN sh -c 'echo "deb https://mirrors.ustc.edu.cn/ros/ubuntu/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/ros-latest.list' && \
-    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys F42ED6FBAB17C654 && \
-    apt-get update && \
+# 添加ROS软件源（兼容ARM64）
+RUN sh -c 'echo "deb http://packages.ros.org/ros/ubuntu focal main" > /etc/apt/sources.list.d/ros-latest.list' && \
+    apt-key adv --keyserver 'hkp://keyserver.ubuntu.com:80' --recv-key C1CF6E31E6BADE8868B172B4F42ED6FBAB17C654 && \
+    apt-get update || \
+    (sh -c 'echo "deb http://mirrors.ustc.edu.cn/ros/ubuntu/ focal main" > /etc/apt/sources.list.d/ros-latest.list' && \
+    apt-key adv --keyserver 'hkp://keyserver.ubuntu.com:80' --recv-key C1CF6E31E6BADE8868B172B4F42ED6FBAB17C654 && \
+    apt-get update) && \
     apt-get install -y --no-install-recommends \
     ros-noetic-ros-base \
     ros-noetic-roscpp \
@@ -255,9 +271,10 @@ RUN sh -c 'echo "deb https://mirrors.ustc.edu.cn/ros/ubuntu/ $(lsb_release -sc) 
     ros-noetic-nodelet \
     ros-noetic-message-runtime \
     ros-noetic-angles \
-    libpcap \
-    -o Dpkg::Options::="--force-overwrite" || \
-    apt-get install -y --fix-broken
+    -o Dpkg::Options::="--force-overwrite" && \
+    echo "=== ROS Installation Complete ===" && \
+    dpkg -l | grep ros-noetic | head -20 && \
+    test -f /opt/ros/noetic/setup.bash || (echo "ERROR: ROS installation failed! /opt/ros/noetic/setup.bash not found!" && ls -la /opt/ && exit 1)
 
 # 从编译阶段复制编译结果
 COPY --from=arm64-builder $CATKIN_WS $CATKIN_WS
@@ -270,8 +287,24 @@ RUN useradd -m -s /bin/bash rosuser && \
 RUN echo '#!/bin/bash\n\
 export ROS_DISTRO=noetic\n\
 export CATKIN_WS=/opt/catkin_ws\n\
-source /opt/ros/$ROS_DISTRO/setup.bash\n\
-source $CATKIN_WS/install/setup.bash\n\
+\n\
+# 检查ROS是否已安装\n\
+if [ -f /opt/ros/$ROS_DISTRO/setup.bash ]; then\n\
+    source /opt/ros/$ROS_DISTRO/setup.bash\n\
+else\n\
+    echo "WARNING: /opt/ros/$ROS_DISTRO/setup.bash not found!"\n\
+    echo "ROS installation may have failed. Please check the Dockerfile."\n\
+    echo "Available content in /opt:"\n\
+    ls -la /opt/ 2>/dev/null || true\n\
+fi\n\
+\n\
+# 检查catkin工作空间\n\
+if [ -f $CATKIN_WS/install/setup.bash ]; then\n\
+    source $CATKIN_WS/install/setup.bash\n\
+else\n\
+    echo "WARNING: $CATKIN_WS/install/setup.bash not found!"\n\
+    echo "Catkin workspace may not be built properly."\n\
+fi\n\
 exec "$@"\n\
 ' > /ros_entrypoint.sh && \
 chmod +x /ros_entrypoint.sh

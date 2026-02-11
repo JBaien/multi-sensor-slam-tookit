@@ -12,11 +12,13 @@ services:
       - ROS_MASTER_URI=http://localhost:11311
       - ROS_IP=127.0.0.1
       - TIMOO_IP=${TIMOO_IP:-192.168.188.115}
-      - LC_ALL=C.UTF-8
+      - LANG=zh_CN.UTF-8
+      - LC_ALL=zh_CN.UTF-8
       - TZ=Asia/Shanghai
     volumes:
-      - ./data:/ros_ws/data:rw
+      - ../data:/ros_ws/data:rw
       - ./configs:/ros_ws/configs:rw
+      - ../timoo/src/timoo_pointcloud/launch:/opt/catkin_ws/src/timoo/timoo_pointcloud/launch:rw
     command: >
       bash -c "
         source /opt/ros/noetic/setup.bash &&
@@ -41,7 +43,8 @@ services:
       - ROS_MASTER_URI=http://localhost:11311
       - ROS_IP=127.0.0.1
       - DISPLAY=${DISPLAY:-:0}
-      - LC_ALL=C.UTF-8
+      - LANG=zh_CN.UTF-8
+      - LC_ALL=zh_CN.UTF-8
       - TZ=Asia/Shanghai
     volumes:
       - ../data:/ros_ws/data:rw
@@ -72,11 +75,13 @@ services:
     environment:
       - ROS_MASTER_URI=http://localhost:11311
       - ROS_IP=127.0.0.1
-      - LC_ALL=C.UTF-8
+      - LANG=zh_CN.UTF-8
+      - LC_ALL=zh_CN.UTF-8
       - TZ=Asia/Shanghai
     volumes:
       - ../data:/ros_ws/data:rw
       - ./configs:/ros_ws/configs:rw
+      - ../heading_ws/src/launch:/opt/catkin_ws/src/heading_ws/launch:rw
     command: >
       bash -c "
         source /opt/ros/noetic/setup.bash &&

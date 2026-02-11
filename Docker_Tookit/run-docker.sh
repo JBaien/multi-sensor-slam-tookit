@@ -39,64 +39,136 @@ echo ""
 
 read -p "请输入选项 (1-6): " choice
 
+# 询问是否后台运行
+BACKGROUND_MODE=""
+if [ "$choice" != "5" ] && [ "$choice" != "6" ]; then
+    read -p "是否后台运行? (y/N): " background_answer
+    if [ "$background_answer" = "y" ] || [ "$background_answer" = "Y" ]; then
+        BACKGROUND_MODE="-d"
+        echo -e "${YELLOW}将以后台模式启动容器${NC}"
+    else
+        BACKGROUND_MODE="--rm -it"
+        echo -e "${YELLOW}将以交互模式启动容器${NC}"
+    fi
+fi
+
 case $choice in
     1)
         echo -e "${YELLOW}启动timoo激光雷达驱动...${NC}"
         read -p "请输入timoo雷达IP地址 [默认: 192.168.188.115]: " timoo_ip
         timoo_ip=${timoo_ip:-192.168.188.115}
-        docker run --rm -it \
+        docker run $BACKGROUND_MODE \
             --name "${CONTAINER_NAME}-timoo" \
             --network host \
             --privileged \
+            --restart unless-stopped \
+            -e LANG=zh_CN.UTF-8 \
+            -e LC_ALL=zh_CN.UTF-8 \
             -v "$(dirname "$(pwd)")/data:/ros_ws/data" \
             -e TIMOO_IP="$timoo_ip" \
             "$IMAGE_NAME" \
             bash -c "
-                source /opt/ros/noetic/setup.bash &&
-                source /opt/catkin_ws/install/setup.bash &&
-                roslaunch timoo_pointcloud TM16.launch device_ip:=${TIMOO_IP}
+                if [ -f /opt/ros/noetic/setup.bash ]; then
+                    export LANG=zh_CN.UTF-8
+                    export LC_ALL=zh_CN.UTF-8
+                    source /opt/ros/noetic/setup.bash &&
+                    source /opt/catkin_ws/install/setup.bash &&
+                    roslaunch timoo_pointcloud TM16.launch device_ip:=${TIMOO_IP}
+                else
+                    echo 'ERROR: ROS not found in /opt/ros/noetic/'
+                    echo 'Available content:'
+                    ls -la /opt/
+                    exit 1
+                fi
             "
+        if [ "$BACKGROUND_MODE" = "-d" ]; then
+            echo -e "${GREEN}容器已在后台启动${NC}"
+            echo -e "${YELLOW}查看日志: docker logs -f ${CONTAINER_NAME}-timoo${NC}"
+            echo -e "${YELLOW}停止容器: docker stop ${CONTAINER_NAME}-timoo${NC}"
+        fi
         ;;
     2)
         echo -e "${YELLOW}启动lidar_target_detector节点...${NC}"
-        docker run --rm -it \
+        docker run $BACKGROUND_MODE \
             --name "${CONTAINER_NAME}-lidar" \
             --network host \
             --privileged \
+            --restart unless-stopped \
+            -e LANG=zh_CN.UTF-8 \
+            -e LC_ALL=zh_CN.UTF-8 \
             -v "$(pwd)/data:/ros_ws/data" \
             "$IMAGE_NAME" \
             bash -c "
-                source /opt/ros/noetic/setup.bash &&
-                source /opt/catkin_ws/install/setup.bash &&
-                roslaunch lidar_target_detection lidar_target_detector.launch
+                if [ -f /opt/ros/noetic/setup.bash ]; then
+                    export LANG=zh_CN.UTF-8
+                    export LC_ALL=zh_CN.UTF-8
+                    source /opt/ros/noetic/setup.bash &&
+                    source /opt/catkin_ws/install/setup.bash &&
+                    roslaunch lidar_target_detection lidar_target_detector.launch
+                else
+                    echo 'ERROR: ROS not found in /opt/ros/noetic/'
+                    echo 'Available content:'
+                    ls -la /opt/
+                    exit 1
+                fi
             "
+        if [ "$BACKGROUND_MODE" = "-d" ]; then
+            echo -e "${GREEN}容器已在后台启动${NC}"
+            echo -e "${YELLOW}查看日志: docker logs -f ${CONTAINER_NAME}-lidar${NC}"
+            echo -e "${YELLOW}停止容器: docker stop ${CONTAINER_NAME}-lidar${NC}"
+        fi
         ;;
     3)
         echo -e "${YELLOW}启动heading_estimation节点...${NC}"
-        docker run --rm -it \
+        docker run $BACKGROUND_MODE \
             --name "${CONTAINER_NAME}-heading" \
             --network host \
             --privileged \
+            --restart unless-stopped \
+            -e LANG=C.UTF-8 \
+            -e LC_ALL=C.UTF-8 \
             -v "$(dirname "$(pwd)")/data:/ros_ws/data" \
             "$IMAGE_NAME" \
             bash -c "
-                source /opt/ros/noetic/setup.bash &&
-                source /opt/catkin_ws/install/setup.bash &&
-                roslaunch heading_estimation heading_estimation.launch
+                if [ -f /opt/ros/noetic/setup.bash ]; then
+                    export LANG=C.UTF-8
+                    export LC_ALL=C.UTF-8
+                    source /opt/ros/noetic/setup.bash &&
+                    source /opt/catkin_ws/install/setup.bash &&
+                    roslaunch heading_estimation heading_estimation.launch
+                else
+                    echo 'ERROR: ROS not found in /opt/ros/noetic/'
+                    echo 'Available content:'
+                    ls -la /opt/
+                    exit 1
+                fi
             "
+        if [ "$BACKGROUND_MODE" = "-d" ]; then
+            echo -e "${GREEN}容器已在后台启动${NC}"
+            echo -e "${YELLOW}查看日志: docker logs -f ${CONTAINER_NAME}-heading${NC}"
+            echo -e "${YELLOW}停止容器: docker stop ${CONTAINER_NAME}-heading${NC}"
+        fi
         ;;
     4)
         echo -e "${YELLOW}同时启动所有节点...${NC}"
         read -p "请输入timoo雷达IP地址 [默认: 192.168.188.115]: " timoo_ip
         timoo_ip=${timoo_ip:-192.168.188.115}
-        docker run --rm -it \
+        docker run $BACKGROUND_MODE \
             --name "$CONTAINER_NAME" \
             --network host \
             --privileged \
+            --restart unless-stopped \
+            -e LANG=zh_CN.UTF-8 \
+            -e LC_ALL=zh_CN.UTF-8 \
             -v "$(pwd)/data:/ros_ws/data" \
             -e TIMOO_IP="$timoo_ip" \
             "$IMAGE_NAME" \
             /start_nodes.sh
+        if [ "$BACKGROUND_MODE" = "-d" ]; then
+            echo -e "${GREEN}容器已在后台启动${NC}"
+            echo -e "${YELLOW}查看日志: docker logs -f ${CONTAINER_NAME}${NC}"
+            echo -e "${YELLOW}停止容器: docker stop ${CONTAINER_NAME}${NC}"
+        fi
         ;;
     5)
         echo -e "${YELLOW}进入容器交互模式...${NC}"
