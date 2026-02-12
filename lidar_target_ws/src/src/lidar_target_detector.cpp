@@ -1,28 +1,18 @@
 #include "lidar_target_detection/lidar_target_detector.h"
 
-#include <geometry_msgs/PointStamped.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <pcl/ModelCoefficients.h>
-#include <pcl/features/normal_3d.h>
-#include <pcl/filters/extract_indices.h>
-#include <pcl/sample_consensus/method_types.h>
-#include <pcl/sample_consensus/model_types.h>
 #include <pcl/search/kdtree.h>
-#include <pcl/segmentation/region_growing.h>
 #include <pcl/segmentation/sac_segmentation.h>
-#include <tf/transform_listener.h>
-#include <visualization_msgs/Marker.h>
+#include <sys/select.h>
 
-#include <Eigen/Eigenvalues>
+#include <chrono>
 #include <iomanip>
 #include <sstream>
 
-// ====== TCP/Modbus 相关修复所需(仅 TCP 层使用)======
-#include <errno.h>
-#include <fcntl.h>
-#include <netinet/tcp.h>
-#include <sys/select.h>
-
 namespace {
+
 static bool setNonBlocking(int fd)
 {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -31,59 +21,78 @@ static bool setNonBlocking(int fd)
     return true;
 }
 
-static bool sendAll(int fd, const uint8_t* data, size_t len)
+static void setSockBuf(int fd, int snd_bytes, int rcv_bytes)
 {
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd_bytes, sizeof(snd_bytes));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv_bytes, sizeof(rcv_bytes));
+}
+
+static void setNoDelay(int fd)
+{
+    int flag = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+}
+
+static void setKeepAlive(int fd)
+{
+    int keepalive = 1;
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+
+    // Linux-only keepalive tuning（在 Docker/ARM64 Linux OK）
+    int keepidle = 30; // 30s idle -> probe
+    int keepintvl = 5; // interval 5s
+    int keepcnt = 3;   // 3 probes
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
+}
+
+// 带 deadline 的 sendAll，防止单个客户端拖死整个 Modbus 服务
+static bool sendAllWithDeadlineMs(int fd, const uint8_t* data, size_t len,
+                                  int deadline_ms)
+{
+    using clock = std::chrono::steady_clock;
+    auto start = clock::now();
+
     size_t sent_total = 0;
-    int eagain_tries = 0;
     while (sent_total < len) {
-        ssize_t n = send(fd, data + sent_total, len - sent_total, 0);
+        ssize_t n = send(fd, data + sent_total, len - sent_total, MSG_NOSIGNAL);
         if (n > 0) {
             sent_total += static_cast<size_t>(n);
-            eagain_tries = 0;
             continue;
         }
         if (n < 0 && errno == EINTR) {
             continue;
         }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            // 非阻塞短暂不可写:等待可写后继续发送
-            if (++eagain_tries > 500) { // 最多等待约 10 秒 (500 * 20ms)
-                return false;
-            }
+            auto now = clock::now();
+            int elapsed = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(now -
+                                                                      start)
+                    .count());
+            int remain = deadline_ms - elapsed;
+            if (remain <= 0) return false;
+
             fd_set wfds;
             FD_ZERO(&wfds);
             FD_SET(fd, &wfds);
+
             struct timeval tv;
-            tv.tv_sec = 0;
-            tv.tv_usec = 20 * 1000; // 20ms
+            tv.tv_sec = remain / 1000;
+            tv.tv_usec = (remain % 1000) * 1000;
+
             int r = select(fd + 1, nullptr, &wfds, nullptr, &tv);
-            if (r > 0) {
-                // socket 可写，重试发送
-                continue;
-            } else if (r == 0) {
-                // select 超时，继续等待
-                continue;
-            } else if (r < 0 && errno == EINTR) {
-                // 被信号中断，继续等待
-                continue;
-            } else {
-                // select 出错
-                return false;
-            }
+            if (r > 0) continue;
+            if (r < 0 && errno == EINTR) continue;
+            return false; // timeout or select error
         }
-        return false;
+        return false; // other fatal send error
     }
     return true;
 }
+
 } // namespace
 
-/**
- * @brief 构造函数,初始化激光雷达反光标靶检测器
- * @param nh ROS节点句柄
- * @param private_nh 私有节点句柄,用于获取参数
- *
- * 功能:初始化所有参数、订阅者、发布者和卡尔曼滤波器
- */
 LidarTargetDetector::LidarTargetDetector(ros::NodeHandle& nh,
                                          ros::NodeHandle& private_nh)
     : nh_(nh),
@@ -93,28 +102,17 @@ LidarTargetDetector::LidarTargetDetector(ros::NodeHandle& nh,
       tcp_server_running_(false),
       heartbeat_(0)
 {
-    // 从参数服务器获取算法参数
-    private_nh_.param("tcp_port", tcp_port_, 5050); // Modbus TCP 端口
-    private_nh_.param("intensity_threshold", intensity_threshold_,
-                      100.0); // 反射强度阈值
-    private_nh_.param("cluster_tolerance", cluster_tolerance_,
-                      0.1); // 聚类距离容差
-    private_nh_.param("min_cluster_size", min_cluster_size_,
-                      10); // 最小聚类点数
-    private_nh_.param("max_cluster_size", max_cluster_size_,
-                      500); // 最大聚类点数
-    private_nh_.param("min_arc_angle", min_arc_angle_,
-                      30.0); // 最小圆弧角度(度)
-    private_nh_.param("max_arc_angle", max_arc_angle_,
-                      180.0); // 最大圆弧角度(度)
-    private_nh_.param("max_rmse_threshold", max_rmse_threshold_,
-                      0.05); // 最大RMSE阈值
-    private_nh_.param("min_target_radius", min_target_radius_,
-                      0.05); // 最小目标半径(m)
-    private_nh_.param("max_target_radius", max_target_radius_,
-                      0.3); // 最大目标半径(m)
+    private_nh_.param("tcp_port", tcp_port_, 5050);
+    private_nh_.param("intensity_threshold", intensity_threshold_, 100.0);
+    private_nh_.param("cluster_tolerance", cluster_tolerance_, 0.1);
+    private_nh_.param("min_cluster_size", min_cluster_size_, 10);
+    private_nh_.param("max_cluster_size", max_cluster_size_, 500);
+    private_nh_.param("min_arc_angle", min_arc_angle_, 30.0);
+    private_nh_.param("max_arc_angle", max_arc_angle_, 180.0);
+    private_nh_.param("max_rmse_threshold", max_rmse_threshold_, 0.05);
+    private_nh_.param("min_target_radius", min_target_radius_, 0.05);
+    private_nh_.param("max_target_radius", max_target_radius_, 0.3);
 
-    // 初始化ROS订阅者和发布者
     cloud_sub_ = nh_.subscribe("input_cloud", 1,
                                &LidarTargetDetector::cloudCallback, this);
     target_pub_ =
@@ -123,28 +121,19 @@ LidarTargetDetector::LidarTargetDetector(ros::NodeHandle& nh,
         nh_.advertise<sensor_msgs::PointCloud2>("filtered_cloud", 1);
     clusters_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("clusters", 1);
 
-    // 初始化卡尔曼滤波器状态
-    state_ = Eigen::Vector4d::Zero(); // [x, y, vx, vy] - 位置和速度状态
-    P_ = Eigen::Matrix4d::Identity() * 10.0;  // 初始状态协方差矩阵
-    H_ = Eigen::Matrix<double, 2, 4>::Zero(); // 观测矩阵
-    H_(0, 0) = 1.0;                           // 观测x位置
-    H_(1, 1) = 1.0;                           // 观测y位置
-
-    // 过程噪声(假设目标移动较慢)
+    state_ = Eigen::Vector4d::Zero();
+    P_ = Eigen::Matrix4d::Identity() * 10.0;
+    H_ = Eigen::Matrix<double, 2, 4>::Zero();
+    H_(0, 0) = 1.0;
+    H_(1, 1) = 1.0;
     Q_ = Eigen::Matrix4d::Identity() * 0.01;
-
-    // 观测噪声(基于激光雷达测量精度)
     R_ = Eigen::Matrix2d::Identity() * 0.001;
 
-    // 初始化Modbus寄存器
-    memset(modbus_registers_, 0, sizeof(modbus_registers_));
+    for (auto& r : modbus_registers_) r.store(0, std::memory_order_relaxed);
+    modbus_registers_[REG_DISTANCE].store(1000, std::memory_order_relaxed);
+    modbus_registers_[REG_ANGLE].store(0, std::memory_order_relaxed);
 
-    // 初始化固定值寄存器
-    modbus_registers_[REG_DISTANCE] = 1000; // 移动距离: 1000mm
-    modbus_registers_[REG_ANGLE] = 0;       // 移动角度: 0
-
-    // 输出初始化信息
-    ROS_INFO("Lidar Target Detector initialized with parameters:");
+    ROS_INFO("Lidar Target Detector initialized:");
     ROS_INFO("  TCP Port: %d", tcp_port_);
     ROS_INFO("  Intensity threshold: %.1f", intensity_threshold_);
     ROS_INFO("  Cluster tolerance: %.3f m", cluster_tolerance_);
@@ -156,34 +145,403 @@ LidarTargetDetector::LidarTargetDetector(ros::NodeHandle& nh,
     ROS_INFO("  Target radius range: %.3f-%.3f m", min_target_radius_,
              max_target_radius_);
 
-    // 初始化TCP服务器
     if (initTCPServer()) {
         ROS_INFO("TCP server initialized on port %d", tcp_port_);
     } else {
         ROS_WARN("Failed to initialize TCP server on port %d", tcp_port_);
     }
 
-    // 启动心跳线程
     heartbeat_thread_ =
         std::thread(&LidarTargetDetector::heartbeatThread, this);
 }
 
-/**
- * @brief 激光雷达点云回调函数,处理接收到的点云数据
- * @param cloud_msg 接收到的激光雷达点云消息
- *
- * 功能流程:
- * 1. 转换点云格式
- * 2. 根据反射强度过滤点云
- * 3. 对过滤后的点云进行聚类
- * 4. 选择反射强度最高的聚类进行圆弧拟合
- * 5. 使用卡尔曼滤波器平滑位置估计
- * 6. 发布检测结果
- */
+LidarTargetDetector::~LidarTargetDetector()
+{
+    closeTCPServer();
+    if (heartbeat_thread_.joinable()) {
+        heartbeat_thread_.join();
+    }
+}
+
+bool LidarTargetDetector::initTCPServer()
+{
+    tcp_server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (tcp_server_fd_ < 0) {
+        ROS_ERROR("Failed to create socket: %s", strerror(errno));
+        return false;
+    }
+
+    int opt = 1;
+    setsockopt(tcp_server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifdef SO_REUSEPORT
+    setsockopt(tcp_server_fd_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+#endif
+
+    setSockBuf(tcp_server_fd_, 512 * 1024, 512 * 1024);
+    setNoDelay(tcp_server_fd_);
+    setNonBlocking(tcp_server_fd_);
+
+    struct sockaddr_in server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(tcp_port_);
+
+    if (bind(tcp_server_fd_, (struct sockaddr*)&server_addr,
+             sizeof(server_addr)) < 0) {
+        ROS_ERROR("Failed to bind to port %d: %s", tcp_port_, strerror(errno));
+        close(tcp_server_fd_);
+        tcp_server_fd_ = -1;
+        return false;
+    }
+
+    if (listen(tcp_server_fd_, 64) < 0) {
+        ROS_ERROR("Failed to listen on socket: %s", strerror(errno));
+        close(tcp_server_fd_);
+        tcp_server_fd_ = -1;
+        return false;
+    }
+
+    tcp_server_running_.store(true, std::memory_order_release);
+    tcp_server_thread_ =
+        std::thread(&LidarTargetDetector::tcpServerThread, this);
+    return true;
+}
+
+void LidarTargetDetector::closeTCPServer()
+{
+    bool expected = true;
+    if (!tcp_server_running_.compare_exchange_strong(expected, false)) {
+        // already stopped
+    }
+
+    // 先关闭 listen fd，唤醒 select
+    if (tcp_server_fd_ >= 0) {
+        shutdown(tcp_server_fd_, SHUT_RDWR);
+        close(tcp_server_fd_);
+        tcp_server_fd_ = -1;
+    }
+
+    if (tcp_server_thread_.joinable()) {
+        tcp_server_thread_.join();
+    }
+
+    // 线程退出后再清理客户端资源
+    for (int fd : tcp_client_fds_) {
+        shutdown(fd, SHUT_RDWR);
+        close(fd);
+    }
+    tcp_client_fds_.clear();
+    client_rx_caches_.clear();
+}
+
+void LidarTargetDetector::removeClient(int client_fd)
+{
+    auto it =
+        std::find(tcp_client_fds_.begin(), tcp_client_fds_.end(), client_fd);
+    if (it != tcp_client_fds_.end()) tcp_client_fds_.erase(it);
+    client_rx_caches_.erase(client_fd);
+
+    shutdown(client_fd, SHUT_RDWR);
+    close(client_fd);
+
+    ROS_WARN("TCP client removed (fd=%d), total clients: %zu", client_fd,
+             tcp_client_fds_.size());
+}
+
+void LidarTargetDetector::tcpServerThread()
+{
+    ROS_INFO("TCP server thread started, port=%d", tcp_port_);
+
+    while (tcp_server_running_.load(std::memory_order_acquire)) {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+
+        int max_fd = -1;
+        if (tcp_server_fd_ >= 0) {
+            FD_SET(tcp_server_fd_, &read_fds);
+            max_fd = tcp_server_fd_;
+        }
+
+        // select 监听所有 client
+        for (int fd : tcp_client_fds_) {
+            FD_SET(fd, &read_fds);
+            if (fd > max_fd) max_fd = fd;
+        }
+
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 200 * 1000; // 200ms：低延迟且可快速退出
+
+        int ret = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
+        if (ret < 0) {
+            if (!tcp_server_running_.load()) break;
+            if (errno == EINTR) continue;
+            ROS_WARN("select error: %s", strerror(errno));
+            continue;
+        }
+        if (!tcp_server_running_.load()) break;
+
+        // 1) accept draining
+        if (tcp_server_fd_ >= 0 && FD_ISSET(tcp_server_fd_, &read_fds)) {
+            while (true) {
+                struct sockaddr_in client_addr;
+                socklen_t client_len = sizeof(client_addr);
+                int client_fd =
+                    accept(tcp_server_fd_, (struct sockaddr*)&client_addr,
+                           &client_len);
+                if (client_fd < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                    if (errno == EINTR) continue;
+                    ROS_WARN("accept error: %s", strerror(errno));
+                    break;
+                }
+
+                setNonBlocking(client_fd);
+                setSockBuf(client_fd, 512 * 1024, 512 * 1024);
+                setNoDelay(client_fd);
+                setKeepAlive(client_fd);
+
+                tcp_client_fds_.push_back(client_fd);
+                client_rx_caches_[client_fd].clear();
+
+                char ip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &client_addr.sin_addr, ip, INET_ADDRSTRLEN);
+                ROS_INFO("TCP client connected: %s:%d (fd=%d), total=%zu", ip,
+                         ntohs(client_addr.sin_port), client_fd,
+                         tcp_client_fds_.size());
+            }
+        }
+
+        // 2) recv draining for each ready client
+        // 注意：遍历时可能 removeClient，使用 index 方式更安全
+        for (size_t i = 0; i < tcp_client_fds_.size(); /*++i in loop*/) {
+            int client_fd = tcp_client_fds_[i];
+            if (!FD_ISSET(client_fd, &read_fds)) {
+                ++i;
+                continue;
+            }
+
+            bool need_close = false;
+            uint8_t buffer[512];
+
+            auto& rx_cache = client_rx_caches_[client_fd];
+
+            while (true) {
+                ssize_t n = recv(client_fd, buffer, sizeof(buffer), 0);
+                if (n > 0) {
+                    rx_cache.insert(rx_cache.end(), buffer, buffer + n);
+                    continue; // draining
+                }
+                if (n == 0) { // peer closed
+                    need_close = true;
+                    break;
+                }
+                if (n < 0 && errno == EINTR) continue;
+                if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+                // other error
+                need_close = true;
+                break;
+            }
+
+            if (need_close) {
+                removeClient(client_fd);
+                // removeClient 会改变 tcp_client_fds_，此时不要 ++i
+                continue;
+            }
+
+            // 3) Modbus TCP framing
+            while (true) {
+                if (rx_cache.size() < 6) break;
+
+                uint16_t protocol_id = (rx_cache[2] << 8) | rx_cache[3];
+                uint16_t length_field = (rx_cache[4] << 8) | rx_cache[5];
+
+                if (protocol_id != 0) {
+                    rx_cache.erase(rx_cache.begin());
+                    continue;
+                }
+                if (length_field < 2 || length_field > 253) {
+                    rx_cache.erase(rx_cache.begin());
+                    continue;
+                }
+
+                size_t total = 6 + static_cast<size_t>(length_field);
+                if (rx_cache.size() < total) break;
+
+                std::vector<uint8_t> frame(rx_cache.begin(),
+                                           rx_cache.begin() + total);
+                rx_cache.erase(rx_cache.begin(), rx_cache.begin() + total);
+
+                handleModbusRequest(client_fd, frame.data(),
+                                    static_cast<ssize_t>(frame.size()));
+
+                // 如果在 handle 里被移除，rx_cache
+                // 引用已经失效；安全起见检查是否还在列表
+                if (std::find(tcp_client_fds_.begin(), tcp_client_fds_.end(),
+                              client_fd) == tcp_client_fds_.end()) {
+                    break;
+                }
+            }
+
+            ++i;
+        }
+    }
+
+    ROS_INFO("TCP server thread stopped");
+}
+
+void LidarTargetDetector::heartbeatThread()
+{
+    ROS_INFO("Heartbeat thread started (20ms)");
+    while (tcp_server_running_.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        uint16_t hb = heartbeat_.fetch_add(1) + 1;
+        if (hb == 0) { // wrap
+            heartbeat_.store(1);
+            hb = 1;
+        }
+        modbus_registers_[REG_HEARTBEAT].store(hb, std::memory_order_relaxed);
+    }
+    ROS_INFO("Heartbeat thread stopped");
+}
+
+void LidarTargetDetector::sendTCPData(
+    const geometry_msgs::PointStamped& position)
+{
+    // 更新 Modbus 寄存器（原子写）
+    int32_t x_mm32 =
+        static_cast<int32_t>(std::llround(position.point.x * 1000.0));
+    int32_t y_mm32 =
+        static_cast<int32_t>(std::llround(position.point.y * 1000.0));
+
+    // 截断到 int16 范围，避免溢出导致奇怪值
+    if (x_mm32 > 32767) x_mm32 = 32767;
+    if (x_mm32 < -32768) x_mm32 = -32768;
+    if (y_mm32 > 32767) y_mm32 = 32767;
+    if (y_mm32 < -32768) y_mm32 = -32768;
+
+    int16_t x_mm = static_cast<int16_t>(x_mm32);
+    int16_t y_mm = static_cast<int16_t>(y_mm32);
+
+    modbus_registers_[REG_X_COORD].store(static_cast<uint16_t>(x_mm),
+                                         std::memory_order_relaxed);
+    modbus_registers_[REG_Y_COORD].store(static_cast<uint16_t>(y_mm),
+                                         std::memory_order_relaxed);
+}
+
+void LidarTargetDetector::handleModbusRequest(int client_fd,
+                                              const uint8_t* request,
+                                              ssize_t length)
+{
+    if (length < 8) return;
+
+    uint16_t protocol_id = (request[2] << 8) | request[3];
+    uint16_t length_field = (request[4] << 8) | request[5];
+    uint8_t unit_id = request[6];
+    uint8_t function_code = request[7];
+
+    if (protocol_id != 0) return;
+    if (length != static_cast<ssize_t>(6 + length_field)) return;
+
+    uint8_t response[260];
+    ssize_t response_len = 0;
+
+    // MBAP: transaction + protocol
+    response[0] = request[0];
+    response[1] = request[1];
+    response[2] = request[2];
+    response[3] = request[3];
+    response[6] = unit_id;
+
+    switch (function_code) {
+        case 0x03: { // Read Holding Registers
+            if (length < 12) return;
+            uint16_t start_addr = (request[8] << 8) | request[9];
+            uint16_t reg_count = (request[10] << 8) | request[11];
+
+            if (reg_count == 0 || reg_count > 125) {
+                response[7] = 0x83;
+                response[8] = 0x03;
+                response_len = 9;
+                break;
+            }
+            if (static_cast<size_t>(start_addr) + reg_count > REG_COUNT) {
+                response[7] = 0x83;
+                response[8] = 0x02;
+                response_len = 9;
+                break;
+            }
+
+            response[7] = 0x03;
+            response[8] = static_cast<uint8_t>(reg_count * 2);
+            response_len = 9;
+
+            for (uint16_t i = 0; i < reg_count; ++i) {
+                uint16_t v = modbus_registers_[start_addr + i].load(
+                    std::memory_order_relaxed);
+                response[response_len++] =
+                    static_cast<uint8_t>((v >> 8) & 0xFF);
+                response[response_len++] = static_cast<uint8_t>(v & 0xFF);
+            }
+            break;
+        }
+
+        case 0x06: { // Write Single Register
+            if (length < 12) return;
+            uint16_t reg_addr = (request[8] << 8) | request[9];
+            uint16_t reg_value = (request[10] << 8) | request[11];
+
+            if (reg_addr >= REG_COUNT) {
+                response[7] = 0x86;
+                response[8] = 0x02;
+                response_len = 9;
+                break;
+            }
+
+            modbus_registers_[reg_addr].store(reg_value,
+                                              std::memory_order_relaxed);
+
+            response[7] = 0x06;
+            response[8] = request[8];
+            response[9] = request[9];
+            response[10] = request[10];
+            response[11] = request[11];
+            response_len = 12;
+            break;
+        }
+
+        default: {
+            response[7] = function_code | 0x80;
+            response[8] = 0x01; // illegal function
+            response_len = 9;
+            break;
+        }
+    }
+
+    // length = UnitId(1) + PDU(response_len-7)
+    response[4] = static_cast<uint8_t>(((response_len - 6) >> 8) & 0xFF);
+    response[5] = static_cast<uint8_t>((response_len - 6) & 0xFF);
+
+    // 关键：短 deadline，避免一个坏连接把整个线程卡死
+    const int SEND_DEADLINE_MS = 100;
+    bool ok = sendAllWithDeadlineMs(client_fd, response,
+                                    static_cast<size_t>(response_len),
+                                    SEND_DEADLINE_MS);
+    if (!ok) {
+        ROS_WARN(
+            "send Modbus response failed/timeout (fd=%d, errno=%s). drop "
+            "client.",
+            client_fd, strerror(errno));
+        removeClient(client_fd);
+    }
+}
+
+// ===== 点云处理逻辑（基本保持你的原始版本） =====
+
 void LidarTargetDetector::cloudCallback(
     const sensor_msgs::PointCloud2::ConstPtr& cloud_msg)
 {
-    // 步骤1: 转换ROS点云消息为PCL格式
     pcl::PointCloud<PointXYZIRT>::Ptr cloud(new pcl::PointCloud<PointXYZIRT>);
     pcl::fromROSMsg(*cloud_msg, *cloud);
 
@@ -192,93 +550,44 @@ void LidarTargetDetector::cloudCallback(
         return;
     }
 
-    ROS_DEBUG("Received point cloud with %zu points", cloud->size());
-
-    // 步骤2: 根据反射强度过滤点云,提取反光标靶数据
     pcl::PointCloud<PointXYZIRT>::Ptr filtered_cloud = filterByIntensity(cloud);
-
     if (filtered_cloud->empty()) {
         ROS_WARN("No points above intensity threshold %.1f",
                  intensity_threshold_);
-        // 调试:检查原始点云的强度分布
-        float max_intensity = 0.0;
-        for (const auto& point : cloud->points) {
-            if (point.intensity > max_intensity) {
-                max_intensity = point.intensity;
-            }
-        }
-        ROS_WARN("Maximum intensity in raw cloud: %.1f", max_intensity);
         return;
     }
 
-    ROS_INFO("Filtered cloud has %zu points above intensity threshold",
-             filtered_cloud->size());
-
-    // 步骤3: 对高反射强度点云进行聚类,分离不同的反光标靶
     std::vector<pcl::PointCloud<PointXYZIRT>::Ptr> clusters =
         extractClusters(filtered_cloud);
-
     if (clusters.empty()) {
         ROS_WARN("No clusters found in filtered cloud");
         return;
     }
 
-    ROS_INFO("Found %zu clusters", clusters.size());
-
-    // 调试:输出每个聚类的大小
-    for (size_t i = 0; i < clusters.size(); ++i) {
-        ROS_INFO("Cluster %zu: %zu points", i, clusters[i]->size());
-    }
-
-    // 步骤4: 选择反射强度最高的聚类进行圆弧拟合
     pcl::PointCloud<PointXYZIRT>::Ptr highest_intensity_cluster = nullptr;
     double max_avg_intensity = 0.0;
 
-    // 遍历所有聚类,计算每个聚类的平均反射强度
-    for (size_t i = 0; i < clusters.size(); ++i) {
-        const auto& cluster = clusters[i];
-        if (cluster->size() >= min_cluster_size_) {
-            double avg_intensity = 0.0;
-            for (const auto& point : cluster->points) {
-                avg_intensity += point.intensity;
-            }
-            avg_intensity /= cluster->size();
-
-            ROS_INFO("Cluster %zu: size=%zu, avg_intensity=%.1f", i,
-                     cluster->size(), avg_intensity);
-
-            // 选择平均反射强度最高的聚类
-            if (avg_intensity > max_avg_intensity) {
-                max_avg_intensity = avg_intensity;
-                highest_intensity_cluster = cluster;
-            }
-        } else {
-            ROS_INFO("Cluster %zu: size=%zu (too small, min required=%d)", i,
-                     cluster->size(), min_cluster_size_);
+    for (const auto& cluster : clusters) {
+        if (static_cast<int>(cluster->size()) < min_cluster_size_) continue;
+        double avg_intensity = 0.0;
+        for (const auto& p : cluster->points) avg_intensity += p.intensity;
+        avg_intensity /= std::max<size_t>(1, cluster->size());
+        if (avg_intensity > max_avg_intensity) {
+            max_avg_intensity = avg_intensity;
+            highest_intensity_cluster = cluster;
         }
     }
 
-    // 步骤5: 只对反射强度最高的聚类进行圆弧拟合
     geometry_msgs::PointStamped best_target;
     bool target_found = false;
-
-    if (highest_intensity_cluster != nullptr) {
-        ROS_DEBUG(
-            "Processing highest intensity cluster with avg intensity: %.1f",
-            max_avg_intensity);
-
-        // 对选定的聚类进行圆弧拟合,获取标靶中心位置
-        if (fitArcAndGetCenter(highest_intensity_cluster, best_target)) {
-            target_found = true;
-            ROS_DEBUG("Target detected from highest intensity cluster");
-        }
+    if (highest_intensity_cluster &&
+        fitArcAndGetCenter(highest_intensity_cluster, best_target)) {
+        target_found = true;
     }
 
-    // 5. 如果找到目标,更新卡尔曼滤波器并发布
     if (target_found) {
         updateKalmanFilter(best_target);
 
-        // 发布滤波后的位置
         geometry_msgs::PointStamped filtered_position;
         filtered_position.header = cloud_msg->header;
         filtered_position.point.x = state_(0);
@@ -286,68 +595,42 @@ void LidarTargetDetector::cloudCallback(
         filtered_position.point.z = 0.0;
 
         target_pub_.publish(filtered_position);
-
-        // 通过TCP发送数据
-        sendTCPData(filtered_position);
-
-        ROS_DEBUG(
-            "Target detected at (%.3f, %.3f) from highest intensity cluster "
-            "(avg: %.1f)",
-            filtered_position.point.x, filtered_position.point.y,
-            max_avg_intensity);
+        sendTCPData(filtered_position); // 仅更新寄存器
     }
 
-    // 发布过滤后的点云用于可视化(转换为单色点云)
+    // 发布过滤点云（单色）
     pcl::PointCloud<pcl::PointXYZRGB> single_color_cloud;
-    for (const auto& point : filtered_cloud->points) {
-        pcl::PointXYZRGB colored_point;
-        colored_point.x = point.x;
-        colored_point.y = point.y;
-        colored_point.z = point.z;
-        colored_point.r = 255; // 红色
-        colored_point.g = 0;
-        colored_point.b = 0;
-        single_color_cloud.push_back(colored_point);
+    single_color_cloud.reserve(filtered_cloud->size());
+    for (const auto& p : filtered_cloud->points) {
+        pcl::PointXYZRGB cp;
+        cp.x = p.x;
+        cp.y = p.y;
+        cp.z = p.z;
+        cp.r = 255;
+        cp.g = 0;
+        cp.b = 0;
+        single_color_cloud.push_back(cp);
     }
-
     sensor_msgs::PointCloud2 filtered_cloud_msg;
     pcl::toROSMsg(single_color_cloud, filtered_cloud_msg);
     filtered_cloud_msg.header = cloud_msg->header;
     filtered_cloud_pub_.publish(filtered_cloud_msg);
 
-    // 发布聚类可视化点云(不同聚类用不同颜色)
-    if (!clusters.empty()) {
-        publishClustersVisualization(clusters, cloud_msg->header);
-    }
+    publishClustersVisualization(clusters, cloud_msg->header);
 }
 
-/**
- * @brief 根据反射强度过滤点云,提取反光标靶数据
- * @param cloud 输入点云
- * @return 过滤后的高反射强度点云
- *
- * 功能:遍历点云中的所有点,只保留反射强度高于阈值的点
- * 这些点通常对应于反光标靶的表面
- */
 pcl::PointCloud<PointXYZIRT>::Ptr LidarTargetDetector::filterByIntensity(
     const pcl::PointCloud<PointXYZIRT>::Ptr& cloud)
 {
-    pcl::PointCloud<PointXYZIRT>::Ptr filtered_cloud(
-        new pcl::PointCloud<PointXYZIRT>);
-
-    // 遍历所有点,筛选反射强度高于阈值的点
-    for (const auto& point : cloud->points) {
-        if (point.intensity >= intensity_threshold_) {
-            filtered_cloud->push_back(point);
-        }
+    pcl::PointCloud<PointXYZIRT>::Ptr out(new pcl::PointCloud<PointXYZIRT>);
+    out->reserve(cloud->size());
+    for (const auto& p : cloud->points) {
+        if (p.intensity >= intensity_threshold_) out->push_back(p);
     }
-
-    // 设置点云属性
-    filtered_cloud->width = filtered_cloud->size();
-    filtered_cloud->height = 1;
-    filtered_cloud->is_dense = true;
-
-    return filtered_cloud;
+    out->width = out->size();
+    out->height = 1;
+    out->is_dense = true;
+    return out;
 }
 
 std::vector<pcl::PointCloud<PointXYZIRT>::Ptr>
@@ -356,24 +639,22 @@ LidarTargetDetector::extractClusters(
 {
     std::vector<pcl::PointCloud<PointXYZIRT>::Ptr> clusters;
 
-    // 将自定义点云转换为标准PointXYZI点云进行聚类
     pcl::PointCloud<pcl::PointXYZI>::Ptr xyz_cloud(
         new pcl::PointCloud<pcl::PointXYZI>);
-    for (const auto& point : cloud->points) {
-        pcl::PointXYZI xyz_point;
-        xyz_point.x = point.x;
-        xyz_point.y = point.y;
-        xyz_point.z = point.z;
-        xyz_point.intensity = point.intensity;
-        xyz_cloud->push_back(xyz_point);
+    xyz_cloud->reserve(cloud->size());
+    for (const auto& p : cloud->points) {
+        pcl::PointXYZI q;
+        q.x = p.x;
+        q.y = p.y;
+        q.z = p.z;
+        q.intensity = p.intensity;
+        xyz_cloud->push_back(q);
     }
 
-    // 创建KD树用于聚类(使用标准点类型)
     pcl::search::KdTree<pcl::PointXYZI>::Ptr tree(
         new pcl::search::KdTree<pcl::PointXYZI>);
     tree->setInputCloud(xyz_cloud);
 
-    // 欧几里得聚类(使用标准点类型)
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<pcl::PointXYZI> ec;
     ec.setClusterTolerance(cluster_tolerance_);
@@ -383,17 +664,16 @@ LidarTargetDetector::extractClusters(
     ec.setInputCloud(xyz_cloud);
     ec.extract(cluster_indices);
 
-    // 提取聚类点云(转换回自定义点类型)
     for (const auto& indices : cluster_indices) {
-        pcl::PointCloud<PointXYZIRT>::Ptr cluster(
-            new pcl::PointCloud<PointXYZIRT>);
-        for (const auto& idx : indices.indices) {
-            cluster->push_back((*cloud)[idx]);
+        pcl::PointCloud<PointXYZIRT>::Ptr c(new pcl::PointCloud<PointXYZIRT>);
+        c->reserve(indices.indices.size());
+        for (int idx : indices.indices) {
+            c->push_back((*cloud)[idx]);
         }
-        cluster->width = cluster->size();
-        cluster->height = 1;
-        cluster->is_dense = true;
-        clusters.push_back(cluster);
+        c->width = c->size();
+        c->height = 1;
+        c->is_dense = true;
+        clusters.push_back(c);
     }
 
     return clusters;
@@ -403,26 +683,16 @@ bool LidarTargetDetector::fitArcAndGetCenter(
     const pcl::PointCloud<PointXYZIRT>::Ptr& cluster,
     geometry_msgs::PointStamped& center)
 {
-    if (cluster->size() < 10) {
-        return false;
-    }
+    if (cluster->size() < 10) return false;
 
-    // 计算点云在Z轴上的平均高度,作为圆柱体的高度参考
     double sum_z = 0.0;
-    for (const auto& point : cluster->points) {
-        sum_z += point.z;
-    }
-    double avg_z = sum_z / cluster->size();
+    for (const auto& p : cluster->points) sum_z += p.z;
+    double avg_z = sum_z / static_cast<double>(cluster->size());
 
-    // 使用最小二乘法在XY平面拟合圆弧
-    double center_x, center_y, radius, rmse;
-
-    // 构建最小二乘拟合矩阵
-    int n = cluster->size();
+    const int n = static_cast<int>(cluster->size());
     Eigen::MatrixXd A(n, 3);
     Eigen::VectorXd b(n);
 
-    // 计算质心
     double sum_x = 0.0, sum_y = 0.0;
     for (const auto& p : cluster->points) {
         sum_x += p.x;
@@ -440,47 +710,34 @@ bool LidarTargetDetector::fitArcAndGetCenter(
         b(i) = x * x + y * y;
     }
 
-    // 求解最小二乘问题
-    Eigen::Vector3d solution =
+    Eigen::Vector3d sol =
         A.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(b);
 
-    // 计算圆心和半径
-    center_x = solution(0) + mean_x;
-    center_y = solution(1) + mean_y;
-    radius = std::sqrt(solution(0) * solution(0) + solution(1) * solution(1) +
-                       solution(2));
+    double center_x = sol(0) + mean_x;
+    double center_y = sol(1) + mean_y;
+    double radius = std::sqrt(sol(0) * sol(0) + sol(1) * sol(1) + sol(2));
 
-    // 检查半径是否在合理范围内
-    if (radius < min_target_radius_ || radius > max_target_radius_) {
+    if (radius < min_target_radius_ || radius > max_target_radius_)
         return false;
-    }
 
-    // 计算RMSE(拟合质量)
     double sum_sq_error = 0.0;
     for (int i = 0; i < n; ++i) {
         double dx = cluster->points[i].x - center_x;
         double dy = cluster->points[i].y - center_y;
-        double actual_radius = std::sqrt(dx * dx + dy * dy);
-        sum_sq_error += (actual_radius - radius) * (actual_radius - radius);
+        double ar = std::sqrt(dx * dx + dy * dy);
+        double e = (ar - radius);
+        sum_sq_error += e * e;
     }
-    rmse = std::sqrt(sum_sq_error / n);
+    double rmse = std::sqrt(sum_sq_error / n);
+    if (rmse > max_rmse_threshold_) return false;
 
-    // 检查拟合质量
-    if (rmse > max_rmse_threshold_) {
-        return false;
-    }
-
-    // 计算圆弧角度范围(验证是否为部分圆柱体)
     std::vector<double> angles;
+    angles.reserve(cluster->size());
     for (const auto& p : cluster->points) {
-        double dx = p.x - center_x;
-        double dy = p.y - center_y;
-        double angle = std::atan2(dy, dx);
-        angles.push_back(angle);
+        angles.push_back(std::atan2(p.y - center_y, p.x - center_x));
     }
-
-    // 排序角度并计算最大间隔
     std::sort(angles.begin(), angles.end());
+
     double max_gap = 0.0;
     for (size_t i = 0; i < angles.size(); ++i) {
         double gap = angles[(i + 1) % angles.size()] - angles[i];
@@ -491,44 +748,66 @@ bool LidarTargetDetector::fitArcAndGetCenter(
     double arc_angle = 2 * M_PI - max_gap;
     double arc_angle_deg = arc_angle * 180.0 / M_PI;
 
-    // 检查圆弧角度是否在合理范围内
-    if (arc_angle_deg < min_arc_angle_ || arc_angle_deg > max_arc_angle_) {
+    if (arc_angle_deg < min_arc_angle_ || arc_angle_deg > max_arc_angle_)
         return false;
-    }
 
-    // 设置中心点坐标(使用平均高度)
     center.point.x = center_x;
     center.point.y = center_y;
     center.point.z = avg_z;
-
-    ROS_DEBUG(
-        "Arc fitted: center=(%.3f, %.3f, %.3f), radius=%.3f, angle=%.1f°, "
-        "RMSE=%.4f",
-        center_x, center_y, avg_z, radius, arc_angle_deg, rmse);
-
     return true;
 }
 
 void LidarTargetDetector::updateKalmanFilter(
     const geometry_msgs::PointStamped& measurement)
 {
-    // 预测步骤
-    double dt = 0.1;   // 假设时间间隔为0.1秒
-    Eigen::Matrix4d F; // 状态转移矩阵
+    double dt = 0.1;
+    Eigen::Matrix4d F;
     F << 1, 0, dt, 0, 0, 1, 0, dt, 0, 0, 1, 0, 0, 0, 0, 1;
 
     state_ = F * state_;
     P_ = F * P_ * F.transpose() + Q_;
 
-    // 更新步骤
-    Eigen::Vector2d z(measurement.point.x, measurement.point.y); // 观测值
-    Eigen::Vector2d y = z - H_ * state_;                         // 观测残差
-    Eigen::Matrix2d S = H_ * P_ * H_.transpose() + R_; // 残差协方差
-    Eigen::Matrix<double, 4, 2> K =
-        P_ * H_.transpose() * S.inverse(); // 卡尔曼增益
+    Eigen::Vector2d z(measurement.point.x, measurement.point.y);
+    Eigen::Vector2d y = z - H_ * state_;
+    Eigen::Matrix2d S = H_ * P_ * H_.transpose() + R_;
+    Eigen::Matrix<double, 4, 2> K = P_ * H_.transpose() * S.inverse();
 
     state_ = state_ + K * y;
     P_ = (Eigen::Matrix4d::Identity() - K * H_) * P_;
+}
+
+void LidarTargetDetector::publishClustersVisualization(
+    const std::vector<pcl::PointCloud<PointXYZIRT>::Ptr>& clusters,
+    const std_msgs::Header& header)
+{
+    pcl::PointCloud<pcl::PointXYZRGB> colored_cloud;
+
+    std::vector<std::tuple<uint8_t, uint8_t, uint8_t>> colors = {
+        {255, 0, 0},   {0, 255, 0},   {0, 0, 255},   {255, 255, 0},
+        {255, 0, 255}, {0, 255, 255}, {255, 128, 0}, {128, 0, 255},
+        {128, 255, 0}, {0, 128, 255}};
+
+    for (size_t i = 0; i < clusters.size(); ++i) {
+        const auto& cluster = clusters[i];
+        auto color = colors[i % colors.size()];
+        for (const auto& p : cluster->points) {
+            pcl::PointXYZRGB cp;
+            cp.x = p.x;
+            cp.y = p.y;
+            cp.z = p.z;
+            cp.r = std::get<0>(color);
+            cp.g = std::get<1>(color);
+            cp.b = std::get<2>(color);
+            colored_cloud.push_back(cp);
+        }
+    }
+
+    if (!colored_cloud.empty()) {
+        sensor_msgs::PointCloud2 msg;
+        pcl::toROSMsg(colored_cloud, msg);
+        msg.header = header;
+        clusters_pub_.publish(msg);
+    }
 }
 
 int main(int argc, char** argv)
@@ -538,528 +817,6 @@ int main(int argc, char** argv)
     ros::NodeHandle private_nh("~");
 
     LidarTargetDetector detector(nh, private_nh);
-
     ros::spin();
-
     return 0;
-}
-
-/**
- * @brief 发布聚类可视化点云,不同聚类用不同颜色
- * @param clusters 聚类列表
- * @param header 点云消息头
- */
-void LidarTargetDetector::publishClustersVisualization(
-    const std::vector<pcl::PointCloud<PointXYZIRT>::Ptr>& clusters,
-    const std_msgs::Header& header)
-{
-    // 创建包含所有聚类的彩色点云
-    pcl::PointCloud<pcl::PointXYZRGB> colored_cloud;
-
-    // 预定义颜色列表(RGB格式)
-    std::vector<std::tuple<uint8_t, uint8_t, uint8_t>> colors = {
-        {255, 0, 0},   // 红色
-        {0, 255, 0},   // 绿色
-        {0, 0, 255},   // 蓝色
-        {255, 255, 0}, // 黄色
-        {255, 0, 255}, // 洋红色
-        {0, 255, 255}, // 青色
-        {255, 128, 0}, // 橙色
-        {128, 0, 255}, // 紫色
-        {128, 255, 0}, // 黄绿色
-        {0, 128, 255}  // 天蓝色
-    };
-
-    // 为每个聚类分配颜色并添加到彩色点云中
-    for (size_t i = 0; i < clusters.size(); ++i) {
-        const auto& cluster = clusters[i];
-        auto color = colors[i % colors.size()]; // 循环使用颜色
-
-        for (const auto& point : cluster->points) {
-            pcl::PointXYZRGB colored_point;
-            colored_point.x = point.x;
-            colored_point.y = point.y;
-            colored_point.z = point.z;
-            colored_point.r = std::get<0>(color);
-            colored_point.g = std::get<1>(color);
-            colored_point.b = std::get<2>(color);
-            colored_cloud.push_back(colored_point);
-        }
-    }
-
-    // 发布彩色点云
-    if (!colored_cloud.empty()) {
-        sensor_msgs::PointCloud2 clusters_msg;
-        pcl::toROSMsg(colored_cloud, clusters_msg);
-        clusters_msg.header = header;
-        clusters_pub_.publish(clusters_msg);
-    }
-}
-
-/**
- * @brief 心跳线程,每20ms递增心跳计数器
- */
-void LidarTargetDetector::heartbeatThread()
-{
-    ROS_INFO("Heartbeat thread started, updating every 20ms");
-    while (tcp_server_running_) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        heartbeat_++;
-        if (heartbeat_ == 0) { // 防止溢出
-            heartbeat_ = 1;
-        }
-        {
-            std::lock_guard<std::mutex> lock(tcp_mutex_);
-            modbus_registers_[REG_HEARTBEAT] = heartbeat_.load();
-        }
-    }
-    ROS_INFO("Heartbeat thread stopped");
-}
-
-/**
- * @brief 初始化TCP服务器
- * @return 初始化成功返回true,失败返回false
- */
-bool LidarTargetDetector::initTCPServer()
-{
-    // 创建socket
-    tcp_server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (tcp_server_fd_ < 0) {
-        ROS_ERROR("Failed to create socket: %s", strerror(errno));
-        return false;
-    }
-
-    // 设置socket选项,允许地址重用
-    int opt = 1;
-    if (setsockopt(tcp_server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt,
-                   sizeof(opt)) < 0) {
-        ROS_ERROR("Failed to set socket options: %s", strerror(errno));
-        close(tcp_server_fd_);
-        return false;
-    }
-
-    // 增加 TCP 缓冲区大小以支持高频连接
-    int send_buf_size = 512 * 1024; // 512KB
-    int recv_buf_size = 512 * 1024; // 512KB
-    setsockopt(tcp_server_fd_, SOL_SOCKET, SO_SNDBUF, &send_buf_size,
-               sizeof(send_buf_size));
-    setsockopt(tcp_server_fd_, SOL_SOCKET, SO_RCVBUF, &recv_buf_size,
-               sizeof(recv_buf_size));
-
-    // 禁用 Nagle 算法，立即发送小数据包（对 Modbus 这种短协议很重要）
-    int flag = 1;
-    setsockopt(tcp_server_fd_, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-
-    // 绑定地址和端口
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(tcp_port_);
-
-    if (bind(tcp_server_fd_, (struct sockaddr*)&server_addr,
-             sizeof(server_addr)) < 0) {
-        ROS_ERROR("Failed to bind to port %d: %s", tcp_port_, strerror(errno));
-        close(tcp_server_fd_);
-        return false;
-    }
-
-    // 开始监听
-    if (listen(tcp_server_fd_, 1) < 0) {
-        ROS_ERROR("Failed to listen on socket: %s", strerror(errno));
-        close(tcp_server_fd_);
-        return false;
-    }
-
-    // 使 listen socket 非阻塞(仅 TCP 层)
-    setNonBlocking(tcp_server_fd_);
-
-    // 启动服务器线程
-    tcp_server_running_ = true;
-    tcp_server_thread_ =
-        std::thread(&LidarTargetDetector::tcpServerThread, this);
-
-    return true;
-}
-
-/**
- * @brief 关闭TCP服务器
- */
-void LidarTargetDetector::closeTCPServer()
-{
-    tcp_server_running_ = false;
-
-    {
-        std::lock_guard<std::mutex> lock(tcp_mutex_);
-        // 关闭所有客户端连接
-        for (int fd : tcp_client_fds_) {
-            shutdown(fd, SHUT_RDWR);
-            close(fd);
-        }
-        tcp_client_fds_.clear();
-        client_rx_caches_.clear();
-    }
-
-    if (tcp_server_fd_ >= 0) {
-        shutdown(tcp_server_fd_, SHUT_RDWR);
-        close(tcp_server_fd_);
-        tcp_server_fd_ = -1;
-    }
-
-    if (tcp_server_thread_.joinable()) {
-        tcp_server_thread_.join();
-    }
-}
-
-/**
- * @brief TCP服务器线程,处理Modbus TCP请求
- */
-void LidarTargetDetector::tcpServerThread()
-{
-    ROS_INFO("TCP server thread started, waiting for connections on port %d",
-             tcp_port_);
-
-    while (tcp_server_running_) {
-        // 设置socket为非阻塞模式,以便能够检查tcp_server_running_
-        struct timeval tv;
-        tv.tv_sec = 2;
-        tv.tv_usec = 0;
-
-        fd_set read_fds;
-        FD_ZERO(&read_fds);
-        FD_SET(tcp_server_fd_, &read_fds);
-        int max_fd = tcp_server_fd_;
-
-        // 获取当前所有客户端 fd（需要加锁）
-        std::vector<int> client_fds_copy;
-        {
-            std::lock_guard<std::mutex> lock(tcp_mutex_);
-            client_fds_copy = tcp_client_fds_;
-        }
-
-        // 将所有客户端加入 select 监听
-        for (int fd : client_fds_copy) {
-            FD_SET(fd, &read_fds);
-            if (fd > max_fd) max_fd = fd;
-        }
-
-        int ret = select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
-        if (ret < 0) {
-            if (tcp_server_running_) {
-                ROS_ERROR("select error: %s", strerror(errno));
-            }
-            continue;
-        }
-
-        if (!tcp_server_running_) {
-            break;
-        }
-
-        if (FD_ISSET(tcp_server_fd_, &read_fds)) {
-            // 接受客户端连接
-            struct sockaddr_in client_addr;
-            socklen_t client_len = sizeof(client_addr);
-            int client_fd = accept(tcp_server_fd_,
-                                   (struct sockaddr*)&client_addr, &client_len);
-
-            if (client_fd < 0) {
-                if (tcp_server_running_) {
-                    ROS_WARN("Failed to accept client connection: %s",
-                             strerror(errno));
-                }
-            } else {
-                // 设置 client socket 非阻塞
-                setNonBlocking(client_fd);
-
-                // 增加 TCP 缓冲区大小以支持高频请求
-                int send_buf_size = 256 * 1024; // 256KB
-                int recv_buf_size = 256 * 1024; // 256KB
-                setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &send_buf_size,
-                           sizeof(send_buf_size));
-                setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &recv_buf_size,
-                           sizeof(recv_buf_size));
-
-                // 禁用 Nagle 算法，立即发送小数据包（对 Modbus
-                // 这种短协议很重要）
-                int flag = 1;
-                setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag,
-                           sizeof(flag));
-
-                // 设置接收/发送超时 (10秒,支持高频请求)
-                tv.tv_sec = 10;
-                tv.tv_usec = 0;
-                setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-                setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-                // 新客户端连接,添加到客户端列表
-                {
-                    std::lock_guard<std::mutex> lock(tcp_mutex_);
-                    tcp_client_fds_.push_back(client_fd);
-                    // 初始化该客户端的接收缓存
-                    client_rx_caches_[client_fd].clear();
-                }
-
-                char client_ip[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &client_addr.sin_addr, client_ip,
-                          INET_ADDRSTRLEN);
-                ROS_INFO(
-                    "TCP client connected from %s:%d (socket buffer: 256KB, "
-                    "TCP_NODELAY enabled), total clients: %zu",
-                    client_ip, ntohs(client_addr.sin_port),
-                    tcp_client_fds_.size());
-            }
-        }
-
-        // 处理每个有数据的客户端
-        for (int client_fd : client_fds_copy) {
-            if (FD_ISSET(client_fd, &read_fds)) {
-                uint8_t buffer[256];
-                ssize_t recv_len = recv(client_fd, buffer, sizeof(buffer), 0);
-
-                if (recv_len > 0) {
-                    // TCP 层:追加到缓存,做 Modbus TCP 组帧(解决半包/粘包)
-                    auto& rx_cache = client_rx_caches_[client_fd];
-                    rx_cache.insert(rx_cache.end(), buffer, buffer + recv_len);
-
-                    // Modbus TCP: total_len = 6 + length_field
-                    while (true) {
-                        if (rx_cache.size() < 6) break;
-
-                        uint16_t protocol_id = (rx_cache[2] << 8) | rx_cache[3];
-                        uint16_t length_field =
-                            (rx_cache[4] << 8) | rx_cache[5];
-
-                        if (protocol_id != 0) {
-                            // 非法数据流,丢 1 字节尝试重同步
-                            rx_cache.erase(rx_cache.begin());
-                            continue;
-                        }
-
-                        // length_field 合理范围:至少 unit(1)+func(1)=2,最大 253
-                        if (length_field < 2 || length_field > 253) {
-                            rx_cache.erase(rx_cache.begin());
-                            continue;
-                        }
-
-                        size_t total = 6 + static_cast<size_t>(length_field);
-                        if (rx_cache.size() < total) break;
-
-                        std::vector<uint8_t> frame(rx_cache.begin(),
-                                                   rx_cache.begin() + total);
-                        rx_cache.erase(rx_cache.begin(),
-                                       rx_cache.begin() + total);
-
-                        // 处理Modbus请求(此时保证是一整帧),传入 client_fd
-                        handleModbusRequest(client_fd, frame.data(),
-                                            static_cast<ssize_t>(frame.size()));
-                    }
-                } else if (recv_len == 0) {
-                    // 客户端正常断开
-                    {
-                        std::lock_guard<std::mutex> lock(tcp_mutex_);
-                        // 从列表中移除
-                        auto it = std::find(tcp_client_fds_.begin(),
-                                            tcp_client_fds_.end(), client_fd);
-                        if (it != tcp_client_fds_.end()) {
-                            tcp_client_fds_.erase(it);
-                        }
-                        client_rx_caches_.erase(client_fd);
-                    }
-                    close(client_fd);
-                    ROS_WARN(
-                        "TCP client disconnected (fd=%d), total clients: %zu",
-                        client_fd, tcp_client_fds_.size());
-                } else if (recv_len < 0 && errno != EAGAIN &&
-                           errno != EWOULDBLOCK) {
-                    // 错误导致断开
-                    {
-                        std::lock_guard<std::mutex> lock(tcp_mutex_);
-                        auto it = std::find(tcp_client_fds_.begin(),
-                                            tcp_client_fds_.end(), client_fd);
-                        if (it != tcp_client_fds_.end()) {
-                            tcp_client_fds_.erase(it);
-                        }
-                        client_rx_caches_.erase(client_fd);
-                    }
-                    close(client_fd);
-                    ROS_WARN("TCP client error (fd=%d): %s, total clients: %zu",
-                             client_fd, strerror(errno),
-                             tcp_client_fds_.size());
-                }
-            }
-        }
-    }
-
-    ROS_INFO("TCP server thread stopped");
-}
-
-/**
- * @brief 通过TCP发送目标位置数据,更新Modbus寄存器
- * @param position 目标位置消息
- */
-void LidarTargetDetector::sendTCPData(
-    const geometry_msgs::PointStamped& position)
-{
-    std::lock_guard<std::mutex> lock(tcp_mutex_);
-
-    // 更新Modbus寄存器
-    // 更新x坐标(米转毫米,int16)
-    int16_t x_mm = static_cast<int16_t>(position.point.x * 1000);
-    modbus_registers_[REG_X_COORD] = static_cast<uint16_t>(x_mm);
-
-    // 更新y坐标(米转毫米,int16)
-    int16_t y_mm = static_cast<int16_t>(position.point.y * 1000);
-    modbus_registers_[REG_Y_COORD] = static_cast<uint16_t>(y_mm);
-
-    ROS_DEBUG("Modbus registers updated: heartbeat=%u, x=%dmm, y=%dmm",
-              modbus_registers_[REG_HEARTBEAT], x_mm, y_mm);
-}
-
-/**
- * @brief 处理Modbus TCP请求
- * @param client_fd 客户端socket描述符
- * @param request Modbus请求数据
- * @param length 请求数据长度
- */
-void LidarTargetDetector::handleModbusRequest(int client_fd, uint8_t* request,
-                                              ssize_t length)
-{
-    if (length < 8) {
-        return; // Modbus TCP最小长度为8字节
-    }
-
-    // 解析Modbus TCP头部
-    uint16_t transaction_id = (request[0] << 8) | request[1];
-    uint16_t protocol_id = (request[2] << 8) | request[3];
-    uint16_t length_field = (request[4] << 8) | request[5];
-    uint8_t unit_id = request[6];
-    uint8_t function_code = request[7];
-
-    ROS_DEBUG("Modbus request received (fd=%d): func=0x%02X, len=%zd",
-              client_fd, function_code, length);
-
-    // 检查协议ID(Modbus TCP应该是0)
-    if (protocol_id != 0) {
-        return;
-    }
-
-    // 校验长度字段:完整帧应满足 length == 6 + length_field
-    if (length != static_cast<ssize_t>(6 + length_field)) {
-        return;
-    }
-
-    // 准备响应
-    uint8_t response[256];
-    ssize_t response_len = 0;
-
-    // 复制事务ID、协议ID、单元ID
-    response[0] = request[0];
-    response[1] = request[1];
-    response[2] = request[2];
-    response[3] = request[3];
-    response[6] = unit_id;
-
-    switch (function_code) {
-        case 0x03: // 读保持寄存器
-        {
-            if (length < 12) {
-                return;
-            }
-
-            uint16_t start_addr = (request[8] << 8) | request[9];
-            uint16_t reg_count = (request[10] << 8) | request[11];
-
-            // 合法范围:1~125
-            if (reg_count == 0 || reg_count > 125) {
-                // 返回异常响应
-                response[7] = 0x83; // 异常功能码
-                response[8] = 0x03; // 非法数据值
-                response_len = 9;
-                break;
-            }
-
-            // 检查寄存器范围
-            if (start_addr + reg_count >
-                sizeof(modbus_registers_) / sizeof(uint16_t)) {
-                // 返回异常响应
-                response[7] = 0x83; // 异常功能码
-                response[8] = 0x02; // 非法数据地址
-                response_len = 9;
-            } else {
-                response[7] = 0x03;
-                response[8] = reg_count * 2; // 字节数
-                response_len = 9;
-
-                // 复制寄存器数据
-                {
-                    std::lock_guard<std::mutex> lock(tcp_mutex_);
-                    for (uint16_t i = 0; i < reg_count; i++) {
-                        uint16_t reg_value = modbus_registers_[start_addr + i];
-                        response[response_len++] = (reg_value >> 8) & 0xFF;
-                        response[response_len++] = reg_value & 0xFF;
-                    }
-                }
-            }
-            break;
-        }
-        case 0x06: // 写单个寄存器
-        {
-            if (length < 12) {
-                return;
-            }
-
-            uint16_t reg_addr = (request[8] << 8) | request[9];
-            uint16_t reg_value = (request[10] << 8) | request[11];
-
-            // 检查寄存器范围
-            if (reg_addr >= sizeof(modbus_registers_) / sizeof(uint16_t)) {
-                response[7] = 0x86; // 异常功能码
-                response[8] = 0x02; // 非法数据地址
-                response_len = 9;
-            } else {
-                // 写入寄存器
-                {
-                    std::lock_guard<std::mutex> lock(tcp_mutex_);
-                    modbus_registers_[reg_addr] = reg_value;
-                }
-
-                // 返回写入确认
-                response[7] = 0x06;
-                response[8] = (reg_addr >> 8) & 0xFF;
-                response[9] = reg_addr & 0xFF;
-                response[10] = (reg_value >> 8) & 0xFF;
-                response[11] = reg_value & 0xFF;
-                response_len = 12;
-            }
-            break;
-        }
-        default:
-            // 不支持的函数码
-            response[7] = function_code | 0x80;
-            response[8] = 0x01; // 非法函数
-            response_len = 9;
-            break;
-    }
-
-    // 统一更新长度字段(包括异常响应)
-    response[4] = ((response_len - 6) >> 8) & 0xFF;
-    response[5] = (response_len - 6) & 0xFF;
-
-    // 发送响应给指定的客户端
-    if (client_fd >= 0) {
-        bool ok =
-            sendAll(client_fd, response, static_cast<size_t>(response_len));
-        if (!ok) {
-            ROS_WARN("Failed to send Modbus response (fd=%d, len=%zd): %s",
-                     client_fd, response_len, strerror(errno));
-            // 发送失败，关闭该客户端
-            std::lock_guard<std::mutex> lock(tcp_mutex_);
-            auto it = std::find(tcp_client_fds_.begin(), tcp_client_fds_.end(),
-                                client_fd);
-            if (it != tcp_client_fds_.end()) {
-                tcp_client_fds_.erase(it);
-            }
-            close(client_fd);
-        }
-    }
 }
