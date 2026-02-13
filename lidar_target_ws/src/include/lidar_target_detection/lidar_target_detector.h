@@ -112,12 +112,24 @@ class LidarTargetDetector {
     double min_target_radius_;
     double max_target_radius_;
 
+    // 动态调整因子(移动时使用) - 从launch文件加载
+    double moving_tolerance_factor_;
+    double moving_min_cluster_factor_;
+    double moving_max_cluster_factor_;
+    double moving_intensity_factor_;
+    double fit_radius_min_factor_;
+    double fit_radius_max_factor_;
+    double fit_rmse_factor_;
+    double fit_arc_min_factor_;
+
     // 卡尔曼滤波器状态
     Eigen::Vector4d state_; // [x, y, vx, vy]
     Eigen::Matrix4d P_;
     Eigen::Matrix<double, 2, 4> H_;
     Eigen::Matrix4d Q_;
     Eigen::Matrix2d R_;
+    ros::Time last_update_time_; // 上次成功检测的时间
+    bool first_detection_; // 首次检测标志
 
     // 回调
     void cloudCallback(const sensor_msgs::PointCloud2::ConstPtr& cloud_msg);
@@ -126,12 +138,16 @@ class LidarTargetDetector {
     pcl::PointCloud<PointXYZIRT>::Ptr filterByIntensity(
         const pcl::PointCloud<PointXYZIRT>::Ptr& cloud);
 
+    pcl::PointCloud<PointXYZIRT>::Ptr filterByIntensityDynamic(
+        const pcl::PointCloud<PointXYZIRT>::Ptr& cloud, double threshold);
+
     std::vector<pcl::PointCloud<PointXYZIRT>::Ptr> extractClusters(
         const pcl::PointCloud<PointXYZIRT>::Ptr& cloud);
 
     bool fitArcAndGetCenter(const pcl::PointCloud<PointXYZIRT>::Ptr& cluster,
                             geometry_msgs::PointStamped& center);
 
+    void predictOnly(); // 仅预测,不测量更新
     void updateKalmanFilter(const geometry_msgs::PointStamped& measurement);
 
     void publishClustersVisualization(

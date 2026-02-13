@@ -35,22 +35,46 @@
         <param name="min_cluster_size" type="int" value="10" />
 
         <!-- 最大聚类大小：有效聚类允许包含的最大点数，避免处理过大区域 -->
-        <param name="max_cluster_size" type="int" value="500" />
+        <param name="max_cluster_size" type="int" value="1500" />
 
         <!-- 最小圆弧角度：有效圆弧必须覆盖的最小角度范围，单位：度 -->
-        <param name="min_arc_angle" type="double" value="30.0" />
+        <param name="min_arc_angle" type="double" value="10.0" />
 
         <!-- 最大圆弧角度：有效圆弧允许覆盖的最大角度范围，单位：度 -->
-        <param name="max_arc_angle" type="double" value="180.0" />
+        <param name="max_arc_angle" type="double" value="360.0" />
 
         <!-- 最大RMSE阈值：圆弧拟合的最大允许均方根误差，用于质量检验，单位：米 -->
         <param name="max_rmse_threshold" type="double" value="0.05" />
 
         <!-- 最小目标半径：有效标靶的最小半径约束，单位：米 -->
-        <param name="min_target_radius" type="double" value="0.05" />
+        <param name="min_target_radius" type="double" value="0.01" />
 
         <!-- 最大目标半径：有效标靶的最大半径约束，单位：米 -->
         <param name="max_target_radius" type="double" value="0.5" />
+
+        <!-- 移动时聚类容差放大因子 -->
+        <param name="moving_tolerance_factor" type="double" value="1.5" />
+
+        <!-- 移动时最小聚类大小因子 -->
+        <param name="moving_min_cluster_factor" type="double" value="0.5" />
+
+        <!-- 移动时最大聚类大小因子 -->
+        <param name="moving_max_cluster_factor" type="double" value="1.5" />
+
+        <!-- 移动时强度阈值降低因子 -->
+        <param name="moving_intensity_factor" type="double" value="0.7" />
+
+        <!-- 拟合半径最小范围因子 -->
+        <param name="fit_radius_min_factor" type="double" value="0.5" />
+
+        <!-- 拟合半径最大范围因子 -->
+        <param name="fit_radius_max_factor" type="double" value="1.5" />
+
+        <!-- 拟合RMSE放宽因子 -->
+        <param name="fit_rmse_factor" type="double" value="2.0" />
+
+        <!-- 拟合圆弧角度最小因子 -->
+        <param name="fit_arc_min_factor" type="double" value="0.3" />
 
         <!-- TCP端口：Modbus TCP服务器监听端口，避免与其他服务冲突 -->
         <param name="tcp_port" type="int" value="5050" />

@@ -103,15 +103,15 @@ LidarTargetDetector::LidarTargetDetector(ros::NodeHandle& nh,
       heartbeat_(0)
 {
     private_nh_.param("tcp_port", tcp_port_, 5050);
-    private_nh_.param("intensity_threshold", intensity_threshold_, 100.0);
-    private_nh_.param("cluster_tolerance", cluster_tolerance_, 0.1);
+    private_nh_.param("intensity_threshold", intensity_threshold_, 150.0);
+    private_nh_.param("cluster_tolerance", cluster_tolerance_, 0.5);
     private_nh_.param("min_cluster_size", min_cluster_size_, 10);
     private_nh_.param("max_cluster_size", max_cluster_size_, 500);
-    private_nh_.param("min_arc_angle", min_arc_angle_, 30.0);
-    private_nh_.param("max_arc_angle", max_arc_angle_, 180.0);
+    private_nh_.param("min_arc_angle", min_arc_angle_, 10.0);
+    private_nh_.param("max_arc_angle", max_arc_angle_, 360.0);
     private_nh_.param("max_rmse_threshold", max_rmse_threshold_, 0.05);
-    private_nh_.param("min_target_radius", min_target_radius_, 0.05);
-    private_nh_.param("max_target_radius", max_target_radius_, 0.3);
+    private_nh_.param("min_target_radius", min_target_radius_, 0.01);
+    private_nh_.param("max_target_radius", max_target_radius_, 0.5);
 
     cloud_sub_ = nh_.subscribe("input_cloud", 1,
                                &LidarTargetDetector::cloudCallback, this);
@@ -128,6 +128,8 @@ LidarTargetDetector::LidarTargetDetector(ros::NodeHandle& nh,
     H_(1, 1) = 1.0;
     Q_ = Eigen::Matrix4d::Identity() * 0.01;
     R_ = Eigen::Matrix2d::Identity() * 0.001;
+    last_update_time_ = ros::Time::now();
+    first_detection_ = true;
 
     for (auto& r : modbus_registers_) r.store(0, std::memory_order_relaxed);
     modbus_registers_[REG_DISTANCE].store(1000, std::memory_order_relaxed);
@@ -542,6 +544,8 @@ void LidarTargetDetector::handleModbusRequest(int client_fd,
 void LidarTargetDetector::cloudCallback(
     const sensor_msgs::PointCloud2::ConstPtr& cloud_msg)
 {
+    auto t_start = std::chrono::high_resolution_clock::now();
+
     pcl::PointCloud<PointXYZIRT>::Ptr cloud(new pcl::PointCloud<PointXYZIRT>);
     pcl::fromROSMsg(*cloud_msg, *cloud);
 
@@ -550,17 +554,35 @@ void LidarTargetDetector::cloudCallback(
         return;
     }
 
-    pcl::PointCloud<PointXYZIRT>::Ptr filtered_cloud = filterByIntensity(cloud);
+    // 动态调整强度阈值:移动时降低阈值,保留更多点
+    double speed = std::sqrt(state_(2) * state_(2) + state_(3) * state_(3));
+    double dynamic_threshold = intensity_threshold_;
+    if (speed > 0.1) {
+        dynamic_threshold = intensity_threshold_ * moving_intensity_factor_; // 移动时降低阈值
+    }
+
+    pcl::PointCloud<PointXYZIRT>::Ptr filtered_cloud =
+        filterByIntensityDynamic(cloud, dynamic_threshold);
     if (filtered_cloud->empty()) {
-        ROS_WARN("No points above intensity threshold %.1f",
-                 intensity_threshold_);
+        static ros::Time last_warn;
+        ros::Time now = ros::Time::now();
+        if ((now - last_warn).toSec() > 2.0) {
+            ROS_WARN_THROTTLE(2.0, "No points above intensity threshold %.1f (dynamic: %.1f)",
+                             intensity_threshold_, dynamic_threshold);
+            last_warn = now;
+        }
         return;
     }
 
     std::vector<pcl::PointCloud<PointXYZIRT>::Ptr> clusters =
         extractClusters(filtered_cloud);
     if (clusters.empty()) {
-        ROS_WARN("No clusters found in filtered cloud");
+        static ros::Time last_warn;
+        ros::Time now = ros::Time::now();
+        if ((now - last_warn).toSec() > 2.0) {
+            ROS_WARN("No clusters found in filtered cloud");
+            last_warn = now;
+        }
         return;
     }
 
@@ -583,6 +605,15 @@ void LidarTargetDetector::cloudCallback(
     if (highest_intensity_cluster &&
         fitArcAndGetCenter(highest_intensity_cluster, best_target)) {
         target_found = true;
+        ROS_INFO_THROTTLE(2.0, "Target detected at (%.3f, %.3f)",
+                          best_target.point.x, best_target.point.y);
+    } else {
+        static ros::Time last_fail_warn;
+        ros::Time now = ros::Time::now();
+        if ((now - last_fail_warn).toSec() > 3.0) {
+            ROS_WARN("Target fitting failed! Check arc_angle/radius thresholds.");
+            last_fail_warn = now;
+        }
     }
 
     if (target_found) {
@@ -595,7 +626,26 @@ void LidarTargetDetector::cloudCallback(
         filtered_position.point.z = 0.0;
 
         target_pub_.publish(filtered_position);
-        sendTCPData(filtered_position); // 仅更新寄存器
+        sendTCPData(filtered_position);
+        last_update_time_ = ros::Time::now();
+    } else {
+        predictOnly();
+
+        geometry_msgs::PointStamped predicted_position;
+        predicted_position.header = cloud_msg->header;
+        predicted_position.point.x = state_(0);
+        predicted_position.point.y = state_(1);
+        predicted_position.point.z = 0.0;
+
+        target_pub_.publish(predicted_position);
+        sendTCPData(predicted_position);
+
+        static ros::Time last_warn;
+        ros::Time now = ros::Time::now();
+        if ((now - last_warn).toSec() > 1.0) {
+            ROS_WARN_THROTTLE(2.0, "Target not detected! Using Kalman prediction at (%.3f, %.3f). Check thresholds.",
+                             predicted_position.point.x, predicted_position.point.y);
+        }
     }
 
     // 发布过滤点云（单色）
@@ -633,6 +683,20 @@ pcl::PointCloud<PointXYZIRT>::Ptr LidarTargetDetector::filterByIntensity(
     return out;
 }
 
+pcl::PointCloud<PointXYZIRT>::Ptr LidarTargetDetector::filterByIntensityDynamic(
+    const pcl::PointCloud<PointXYZIRT>::Ptr& cloud, double threshold)
+{
+    pcl::PointCloud<PointXYZIRT>::Ptr out(new pcl::PointCloud<PointXYZIRT>);
+    out->reserve(cloud->size());
+    for (const auto& p : cloud->points) {
+        if (p.intensity >= threshold) out->push_back(p);
+    }
+    out->width = out->size();
+    out->height = 1;
+    out->is_dense = true;
+    return out;
+}
+
 std::vector<pcl::PointCloud<PointXYZIRT>::Ptr>
 LidarTargetDetector::extractClusters(
     const pcl::PointCloud<PointXYZIRT>::Ptr& cloud)
@@ -655,14 +719,33 @@ LidarTargetDetector::extractClusters(
         new pcl::search::KdTree<pcl::PointXYZI>);
     tree->setInputCloud(xyz_cloud);
 
+    // 动态调整聚类参数:根据Kalman速度估计判断是否为移动目标
+    double speed = std::sqrt(state_(2) * state_(2) + state_(3) * state_(3));
+    bool is_moving = speed > 0.1; // 速度 > 0.1m/s 认为在移动
+
+    // 移动时:增大容差和聚类尺寸范围
+    double dynamic_tolerance = is_moving ? cluster_tolerance_ * moving_tolerance_factor_ : cluster_tolerance_;
+    int dynamic_min_size = is_moving ? static_cast<int>(min_cluster_size_ * moving_min_cluster_factor_) : min_cluster_size_;
+    int dynamic_max_size = is_moving ? static_cast<int>(max_cluster_size_ * moving_max_cluster_factor_) : max_cluster_size_;
+
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<pcl::PointXYZI> ec;
-    ec.setClusterTolerance(cluster_tolerance_);
-    ec.setMinClusterSize(min_cluster_size_);
-    ec.setMaxClusterSize(max_cluster_size_);
+    ec.setClusterTolerance(dynamic_tolerance);
+    ec.setMinClusterSize(dynamic_min_size);
+    ec.setMaxClusterSize(dynamic_max_size);
     ec.setSearchMethod(tree);
     ec.setInputCloud(xyz_cloud);
     ec.extract(cluster_indices);
+
+    // 记录调试信息
+    static ros::Time last_log;
+    ros::Time now = ros::Time::now();
+    if ((now - last_log).toSec() > 2.0) {
+        ROS_INFO("Clustering: %d clusters found, speed=%.2fm/s, tolerance=%.3fm, size=[%d,%d]",
+                 (int)cluster_indices.size(), speed, dynamic_tolerance,
+                 dynamic_min_size, dynamic_max_size);
+        last_log = now;
+    }
 
     for (const auto& indices : cluster_indices) {
         pcl::PointCloud<PointXYZIRT>::Ptr c(new pcl::PointCloud<PointXYZIRT>);
@@ -683,7 +766,15 @@ bool LidarTargetDetector::fitArcAndGetCenter(
     const pcl::PointCloud<PointXYZIRT>::Ptr& cluster,
     geometry_msgs::PointStamped& center)
 {
-    if (cluster->size() < 10) return false;
+    if (cluster->size() < 10) {
+        static ros::Time last_log;
+        ros::Time now = ros::Time::now();
+        if ((now - last_log).toSec() > 3.0) {
+            ROS_WARN_THROTTLE(3.0, "Fit failed: cluster size=%d < min=10", (int)cluster->size());
+            last_log = now;
+        }
+        return false;
+    }
 
     double sum_z = 0.0;
     for (const auto& p : cluster->points) sum_z += p.z;
@@ -717,8 +808,17 @@ bool LidarTargetDetector::fitArcAndGetCenter(
     double center_y = sol(1) + mean_y;
     double radius = std::sqrt(sol(0) * sol(0) + sol(1) * sol(1) + sol(2));
 
-    if (radius < min_target_radius_ || radius > max_target_radius_)
+    // 放宽半径阈值以适应移动场景和实际标靶尺寸
+    if (radius < min_target_radius_ * fit_radius_min_factor_ || radius > max_target_radius_ * fit_radius_max_factor_) {
+        static ros::Time last_log;
+        ros::Time now = ros::Time::now();
+        if ((now - last_log).toSec() > 3.0) {
+            ROS_WARN_THROTTLE(3.0, "Fit failed: radius=%.3fm out of range [%.3f, %.3f]",
+                             radius, min_target_radius_ * fit_radius_min_factor_, max_target_radius_ * fit_radius_max_factor_);
+            last_log = now;
+        }
         return false;
+    }
 
     double sum_sq_error = 0.0;
     for (int i = 0; i < n; ++i) {
@@ -729,7 +829,17 @@ bool LidarTargetDetector::fitArcAndGetCenter(
         sum_sq_error += e * e;
     }
     double rmse = std::sqrt(sum_sq_error / n);
-    if (rmse > max_rmse_threshold_) return false;
+    // 放宽RMSE阈值以容忍移动时的点云畸变
+    if (rmse > max_rmse_threshold_ * fit_rmse_factor_) {
+        static ros::Time last_log;
+        ros::Time now = ros::Time::now();
+        if ((now - last_log).toSec() > 3.0) {
+            ROS_WARN_THROTTLE(3.0, "Fit failed: RMSE=%.4fm > threshold=%.4fm",
+                             rmse, max_rmse_threshold_ * fit_rmse_factor_);
+            last_log = now;
+        }
+        return false;
+    }
 
     std::vector<double> angles;
     angles.reserve(cluster->size());
@@ -748,8 +858,17 @@ bool LidarTargetDetector::fitArcAndGetCenter(
     double arc_angle = 2 * M_PI - max_gap;
     double arc_angle_deg = arc_angle * 180.0 / M_PI;
 
-    if (arc_angle_deg < min_arc_angle_ || arc_angle_deg > max_arc_angle_)
+    // 放宽圆弧角度阈值 - 允许几乎完整的圆
+    if (arc_angle_deg < min_arc_angle_ * fit_arc_min_factor_ || arc_angle_deg > max_arc_angle_) {
+        static ros::Time last_log;
+        ros::Time now = ros::Time::now();
+        if ((now - last_log).toSec() > 3.0) {
+            ROS_WARN_THROTTLE(3.0, "Fit failed: arc_angle=%.1f° out of range [%.1f, %.1f]",
+                             arc_angle_deg, min_arc_angle_ * fit_arc_min_factor_, max_arc_angle_);
+            last_log = now;
+        }
         return false;
+    }
 
     center.point.x = center_x;
     center.point.y = center_y;
@@ -757,15 +876,33 @@ bool LidarTargetDetector::fitArcAndGetCenter(
     return true;
 }
 
+void LidarTargetDetector::predictOnly()
+{
+    // 计算实际时间差
+    ros::Time now = ros::Time::now();
+    double dt = std::min((now - last_update_time_).toSec(), 0.5); // 限制最大dt=0.5s
+    last_update_time_ = now;
+
+    Eigen::Matrix4d F;
+    F << 1, 0, dt, 0, 0, 1, 0, dt, 0, 0, 1, 0, 0, 0, 0, 1;
+
+    // 仅预测,不更新(增加不确定性)
+    state_ = F * state_;
+    P_ = F * P_ * F.transpose() + Q_ * fit_rmse_factor_; // 预测时增加更多不确定性
+}
+
 void LidarTargetDetector::updateKalmanFilter(
     const geometry_msgs::PointStamped& measurement)
 {
-    double dt = 0.1;
+    // 计算实际时间差
+    ros::Time now = ros::Time::now();
+    double dt = std::min((now - last_update_time_).toSec(), 1.0); // 限制最大dt=1.0s
+
     Eigen::Matrix4d F;
     F << 1, 0, dt, 0, 0, 1, 0, dt, 0, 0, 1, 0, 0, 0, 0, 1;
 
     state_ = F * state_;
-    P_ = F * P_ * F.transpose() + Q_;
+    P_ = F * P_ * F.transpose() + Q_ * dt; // Q随dt缩放
 
     Eigen::Vector2d z(measurement.point.x, measurement.point.y);
     Eigen::Vector2d y = z - H_ * state_;
