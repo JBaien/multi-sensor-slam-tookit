@@ -1,0 +1,76 @@
+# Docker构建忽略文件
+
+# Git相关
+.git
+.gitignore
+.gitattributes
+
+# 编译产物
+**/build/
+**/devel/
+**/install/
+**/logs/
+**/.catkin_workspace
+
+# Python缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# IDE相关
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 日志文件
+*.log
+
+# 测试文件
+test/
+tests/
+*_test.cpp
+*_test.h
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+
+# 文档（可选保留）
+*.md
+!README_DOCKER.md
+.pdf
+
+# 数据文件
+*.pcd
+*.bag
+*.ply
+*.las
+
+# 不需要的ROS工作空间
+liosam_ws/
+imu_calib/
+imu_ws/
+nan_filter_ws/
+sync_ws/
+Calibration_Tookit/
+PointClouds_Fusion/
+heading_ws/build/
+heading_ws/devel/
+lidar_target_ws/build/
+lidar_target_ws/devel/
+timoo/build/
+timoo/devel/
+
+# Docker相关
+Docker_Tookit/
+
+# 其他不必要的文件
+*.txt
+!CMakeLists.txt
+!package.xml
+!*.txt

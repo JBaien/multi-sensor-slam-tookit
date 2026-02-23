@@ -1,0 +1,36 @@
+# 话题配置
+lidar_topic: "/lidar_points"       # 激光雷达点云话题，按实际修改
+output_topic: "/target_position"
+
+# 强度滤波
+intensity_threshold: 150.0            # 反射强度阈值
+
+# 距离ROI（只处理此范围内的点）
+min_range: 0.5                        # 最小距离 m
+max_range: 20.0                       # 最大距离 m
+
+# 高度ROI（过滤地面和顶部无关点）
+min_height: -0.5                      # 相对雷达最低高度 m
+max_height:  2.0                      # 相对雷达最高高度 m
+
+# 聚类参数
+cluster_tolerance: 0.08              # DBSCAN 邻域半径 m
+min_cluster_size: 8                  # 最少点数
+max_cluster_size: 200                # 最多点数
+
+# 圆柱尺寸验证
+min_radius: 0.05                     # 最小圆半径 m 
+max_radius: 0.20                     # 最大圆半径 m 
+
+# 卡尔曼滤波
+use_kalman: true
+process_noise_q: 0.01               # 过程噪声
+measurement_noise_r: 0.05           # 观测噪声
+
+# 跟踪
+use_tracking: true                   # 是否启用ROI跟踪加速
+tracking_search_radius: 1.5         # 跟踪时搜索半径 m
+max_lost_frames: 10                 # 最多丢失帧数后重置跟踪
+
+# TCP Modbus 配置
+tcp_port: 5050                      # TCP服务器端口号
