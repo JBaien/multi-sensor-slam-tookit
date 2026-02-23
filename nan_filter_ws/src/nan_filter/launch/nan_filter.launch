@@ -1,0 +1,8 @@
+<launch>
+    <node pkg="nan_filter" type="organized_nan_filter_node" name="organized_nan_filter_node" output="screen">
+        <!-- 明确设置参数 -->
+        <param name="input_topic" value="/lidar_points"/>
+        <param name="output_topic" value="/velodyne_points"/>
+    </node>
+</launch>
+
