@@ -1,0 +1,8 @@
+<launch>
+  <node pkg="lidar_reflector_target_tracker"
+        type="lidar_reflector_target_tracker_node"
+        name="lidar_reflector_target_tracker"
+        output="screen">
+    <rosparam file="$(find lidar_reflector_target_tracker)/config/tracker.yaml" command="load"/>
+  </node>
+</launch>

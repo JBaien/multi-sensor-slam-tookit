@@ -20,6 +20,10 @@ imu_ws/build/
 imu_ws/devel/
 lidar_target_ws/build/
 lidar_target_ws/devel/
+lidar_target_ws/lidar_target01/build/
+lidar_target_ws/lidar_target01/devel/
+lidar_target_ws/lidar_target02/build/
+lidar_target_ws/lidar_target02/devel/
 liosam_ws/build/
 liosam_ws/devel/
 nan_filter_ws/build/
@@ -34,3 +38,4 @@ tmlidar_ws/devel/
 tmlidar_ws/src/.vscode/settings.json
 ros-app.tar.gz
 lidar_points.bag
+
