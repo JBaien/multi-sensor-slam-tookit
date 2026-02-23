@@ -25,7 +25,8 @@ find_package(Boost REQUIRED COMPONENTS thread)
 
 # libpcap provides no pkg-config or find_package module:
 set(libpcap_LIBRARIES -lpcap)
-
+include_directories(/usr/include)
+include_directories(/usr/local/include)
 include_directories(include ${Boost_INCLUDE_DIR} ${catkin_INCLUDE_DIRS})
 
 # Generate dynamic_reconfigure server

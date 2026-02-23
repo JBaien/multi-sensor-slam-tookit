@@ -1,0 +1,13 @@
+<launch>
+  <node pkg="lidar_target_localization"
+        type="target_detector"
+        name="target_detector"
+        output="screen">
+
+    <rosparam file="$(find lidar_target_localization)/config/params.yaml"
+              command="load"/>
+
+    <!-- 按需覆盖参数 -->
+    <!-- <param name="lidar_topic" value="/your_lidar_topic"/> -->
+  </node>
+</launch>
