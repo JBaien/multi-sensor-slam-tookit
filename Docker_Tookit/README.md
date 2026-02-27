@@ -58,11 +58,12 @@ cd Docker_Tookit
 
 脚本提供以下选项：
 1. 启动 timoo 激光雷达驱动
-2. 启动 lidar_target_detector 节点
-3. 启动 heading_estimation 节点
-4. 同时启动所有节点
-5. 进入容器 bash 交互模式
-6. 使用 Docker Compose 启动所有服务
+2. 启动 lidar_target_localization 节点（目标检测）
+3. 启动 lidar_reflector_target_tracker 节点（目标跟踪）
+4. 启动 heading_estimation 节点
+5. 同时启动所有节点（timoo + localization + tracker + heading）
+6. 进入容器 bash 交互模式
+7. 使用 Docker Compose 启动所有服务
 
 #### 方式二：使用 Docker Compose
 
@@ -124,7 +125,7 @@ docker run --rm -it \
 由于 Docker_Tookit 目录位于项目根目录下，所有路径引用已相应调整：
 
 - Docker 构建上下文：项目根目录（`..`）
-- 源代码路径：`../lidar_target_ws/src`, `../heading_ws/src`, `../timoo/src`
+- 源代码路径：`../lidar_target_ws/lidar_target01/src`, `../lidar_target_ws/lidar_target02/src/lidar_target_localization`, `../heading_ws/src`, `../timoo/src`
 - 数据卷挂载：`../data`
 
 ## 注意事项

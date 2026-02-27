@@ -1,5 +1,5 @@
 # 话题配置
-lidar_topic: "/lidar_points"       # 激光雷达点云话题，按实际修改
+lidar_topic: "/timoo_points"       # 激光雷达点云话题，按实际修改
 output_topic: "/target_position"
 
 # 强度滤波

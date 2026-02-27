@@ -23,15 +23,15 @@ CHECKS_PASSED=()
 CHECKS_FAILED=()
 
 # 1. 检查系统架构
-echo -e "${BLUE}[1/10] 检查系统架构...${NC}"
+echo -e "${BLUE}[1/11] 检查系统架构...${NC}"
 ARCH=$(uname -m)
 echo -e "当前架构: ${YELLOW}$ARCH${NC}"
 
 if [ "$ARCH" = "x86_64" ]; then
-    echo -e "${GREEN}✓ 构建环境为x86_64，可以进行跨架构构建${NC}"
+    echo -e "${GREEN}✓ 构建环境为x86_64, 可以进行跨架构构建${NC}"
     CHECKS_PASSED+=("系统架构")
 elif [ "$ARCH" = "aarch64" ]; then
-    echo -e "${GREEN}✓ 当前为ARM64环境，可以直接运行ARM64镜像${NC}"
+    echo -e "${GREEN}✓ 当前为ARM64环境, 可以直接运行ARM64镜像${NC}"
     CHECKS_PASSED+=("系统架构")
 else
     echo -e "${RED}✗ 不支持的架构: $ARCH${NC}"
@@ -40,7 +40,7 @@ fi
 echo ""
 
 # 2. 检查操作系统
-echo -e "${BLUE}[2/10] 检查操作系统...${NC}"
+echo -e "${BLUE}[2/11] 检查操作系统...${NC}"
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     echo -e "操作系统: ${YELLOW}$PRETTY_NAME${NC}"
@@ -52,7 +52,7 @@ fi
 echo ""
 
 # 3. 检查Docker安装
-echo -e "${BLUE}[3/10] 检查Docker安装...${NC}"
+echo -e "${BLUE}[3/11] 检查Docker安装...${NC}"
 if command -v docker &> /dev/null; then
     DOCKER_VERSION=$(docker --version)
     echo -e "Docker版本: ${YELLOW}$DOCKER_VERSION${NC}"
@@ -73,7 +73,7 @@ fi
 echo ""
 
 # 4. 检查Docker buildx
-echo -e "${BLUE}[4/10] 检查Docker buildx...${NC}"
+echo -e "${BLUE}[4/11] 检查Docker buildx...${NC}"
 if docker buildx version &> /dev/null; then
     BUILDX_VERSION=$(docker buildx version | head -n1)
     echo -e "Buildx版本: ${YELLOW}$BUILDX_VERSION${NC}"
@@ -87,7 +87,7 @@ fi
 echo ""
 
 # 5. 检查QEMU
-echo -e "${BLUE}[5/10] 检查QEMU模拟器...${NC}"
+echo -e "${BLUE}[5/11] 检查QEMU模拟器...${NC}"
 if docker run --rm --platform linux/arm64 alpine:3.14 uname -m &> /dev/null; then
     echo -e "${GREEN}✓ QEMU模拟器已配置，支持ARM64模拟${NC}"
     CHECKS_PASSED+=("QEMU模拟器")
@@ -100,18 +100,27 @@ fi
 echo ""
 
 # 6. 检查源代码目录
-echo -e "${BLUE}[6/10] 检查源代码目录...${NC}"
+echo -e "${BLUE}[6/11] 检查源代码目录...${NC}"
 
 # 获取项目根目录
 PROJECT_ROOT="$(dirname "$(pwd)")"
 
-# 检查lidar_target_ws
-if [ -d "$PROJECT_ROOT/lidar_target_ws/src" ]; then
-    echo -e "${GREEN}✓ lidar_target_ws 源代码目录存在${NC}"
-    CHECKS_PASSED+=("lidar_target_ws源码")
+# 检查lidar_target_ws/lidar_target01
+if [ -d "$PROJECT_ROOT/lidar_target_ws/lidar_target01/src" ]; then
+    echo -e "${GREEN}✓ lidar_target_ws/lidar_target01 源代码目录存在${NC}"
+    CHECKS_PASSED+=("lidar_target01源码")
 else
-    echo -e "${RED}✗ lidar_target_ws/src 目录不存在${NC}"
-    CHECKS_FAILED+=("lidar_target_ws源码")
+    echo -e "${RED}✗ lidar_target_ws/lidar_target01/src 目录不存在${NC}"
+    CHECKS_FAILED+=("lidar_target01源码")
+fi
+
+# 检查lidar_target_ws/lidar_target02
+if [ -d "$PROJECT_ROOT/lidar_target_ws/lidar_target02/src/lidar_target_localization" ]; then
+    echo -e "${GREEN}✓ lidar_target_ws/lidar_target02 源代码目录存在${NC}"
+    CHECKS_PASSED+=("lidar_target02源码")
+else
+    echo -e "${RED}✗ lidar_target_ws/lidar_target02/src/lidar_target_localization 目录不存在${NC}"
+    CHECKS_FAILED+=("lidar_target02源码")
 fi
 
 # 检查heading_ws
@@ -141,7 +150,7 @@ fi
 echo ""
 
 # 8. 检查磁盘空间
-echo -e "${BLUE}[8/10] 检查磁盘空间...${NC}"
+echo -e "${BLUE}[8/11] 检查磁盘空间...${NC}"
 DISK_USAGE=$(df -h . | awk 'NR==2 {print $5}' | sed 's/%//')
 DISK_AVAILABLE=$(df -h . | awk 'NR==2 {print $4}')
 echo -e "当前目录磁盘使用率: ${YELLOW}$DISK_USAGE%${NC}"
@@ -157,7 +166,7 @@ fi
 echo ""
 
 # 9. 检查网络连接
-echo -e "${BLUE}[9/10] 检查网络连接...${NC}"
+echo -e "${BLUE}[9/11] 检查网络连接...${NC}"
 if ping -c 1 -W 2 packages.ros.org &> /dev/null; then
     echo -e "${GREEN}✓ 可以访问ROS软件源${NC}"
     CHECKS_PASSED+=("网络连接(ROS)")
@@ -176,7 +185,7 @@ fi
 echo ""
 
 # 10. 检查构建脚本
-echo -e "${BLUE}[10/10] 检查构建脚本...${NC}"
+echo -e "${BLUE}[10/11] 检查构建脚本...${NC}"
 if [ -f "$(pwd)/build-cross-arch.sh" ]; then
     if [ -x "$(pwd)/build-cross-arch.sh" ]; then
         echo -e "${GREEN}✓ build-cross-arch.sh 存在且可执行${NC}"

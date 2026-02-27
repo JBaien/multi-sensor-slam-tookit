@@ -117,12 +117,17 @@ if [ $? -eq 0 ]; then
     echo "  docker load < ros-app.tar.gz"
     
     echo ""
-    echo -e "${YELLOW}6. 单独启动lidar_target_detector:${NC}"
+    echo -e "${YELLOW}6. 单独启动lidar_target_localization(目标检测):${NC}"
     echo "  docker run --rm -it $FULL_IMAGE_NAME"
-    echo "  # 在容器内执行: roslaunch lidar_target_detection lidar_target_detector.launch"
-    
+    echo "  # 在容器内执行: roslaunch lidar_target_localization target_localization.launch"
+
     echo ""
-    echo -e "${YELLOW}7. 单独启动heading_estimation:${NC}"
+    echo -e "${YELLOW}7. 单独启动lidar_reflector_target_tracker(目标跟踪):${NC}"
+    echo "  docker run --rm -it $FULL_IMAGE_NAME"
+    echo "  # 在容器内执行: roslaunch lidar_reflector_target_tracker tracker.launch"
+
+    echo ""
+    echo -e "${YELLOW}8. 单独启动heading_estimation:${NC}"
     echo "  docker run --rm -it $FULL_IMAGE_NAME"
     echo "  # 在容器内执行: roslaunch heading_estimation heading_estimation.launch"
     

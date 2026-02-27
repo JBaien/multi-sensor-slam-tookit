@@ -36,3 +36,18 @@ target_link_libraries(lidar_reflector_target_tracker_node
   ${PCL_LIBRARIES}
   ${CMAKE_THREAD_LIBS_INIT}
 )
+
+## Install ##
+install(TARGETS lidar_reflector_target_tracker_node
+  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+install(DIRECTORY launch/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
+  FILES_MATCHING PATTERN "*.launch"
+)
+
+install(DIRECTORY config/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
+  FILES_MATCHING PATTERN "*.yaml"
+)
