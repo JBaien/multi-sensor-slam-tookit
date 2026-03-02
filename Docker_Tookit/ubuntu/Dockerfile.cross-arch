@@ -2,7 +2,7 @@
 # ============================================
 # Multi-Architecture Dockerfile for ROS Applications
 # Platform: Ubuntu 22.04 aarch64 (ARM64)
-# Target: Run lidar_target_ws + heading_ws on ARM64 without host ROS
+# Target: Run lidar_target01 + lidar_target02 + heading_ws on ARM64 without host ROS
 # Architecture: Cross-compilation from x86_64 to aarch64
 # ROS Version: Noetic (Python 3 compatible, recommended for Ubuntu 22.04)
 # ============================================
@@ -165,6 +165,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-noetic-tf2-ros \
     ros-noetic-tf2-geometry-msgs \
     ros-noetic-eigen-conversions \
+    ros-noetic-visualization-msgs \
     libboost-all-dev \
     libeigen3-dev \
     libpcap-dev \
@@ -175,10 +176,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 创建工作空间目录
 RUN mkdir -p $CATKIN_WS/src
 
-# 复制源代码（从父目录复制）
-COPY ../lidar_target_ws/src $CATKIN_WS/src/lidar_target_ws
-COPY ../heading_ws/src $CATKIN_WS/src/heading_ws
-COPY ../timoo/src $CATKIN_WS/src/timoo
+# 复制源代码（构建上下文是项目根目录）
+COPY lidar_target_ws/lidar_target01/src $CATKIN_WS/src/lidar_reflector_target_tracker
+COPY lidar_target_ws/lidar_target02/src/lidar_target_localization $CATKIN_WS/src/lidar_target_localization
+COPY heading_ws/src $CATKIN_WS/src/heading_ws
+COPY timoo/src $CATKIN_WS/src/timoo
 
 # 编译工作空间
 WORKDIR $CATKIN_WS
@@ -271,6 +273,7 @@ RUN sh -c 'echo "deb http://packages.ros.org/ros/ubuntu focal main" > /etc/apt/s
     ros-noetic-nodelet \
     ros-noetic-message-runtime \
     ros-noetic-angles \
+    ros-noetic-visualization-msgs \
     -o Dpkg::Options::="--force-overwrite" && \
     echo "=== ROS Installation Complete ===" && \
     dpkg -l | grep ros-noetic | head -20 && \
@@ -335,12 +338,20 @@ TIMOO_PID=$!\n\
 # 等待timoo驱动启动\n\
 sleep 3\n\
 \n\
-# 启动lidar_target_detector节点\n\
-echo "Starting lidar_target_detector..."\n\
-roslaunch --wait lidar_target_detection lidar_target_detector.launch &\n\
-LIDAR_PID=$!\n\
+# 启动lidar_target_localization节点（目标检测）\n\
+echo "Starting lidar_target_localization..."\n\
+roslaunch --wait lidar_target_localization target_localization.launch &\n\
+LOCALIZATION_PID=$!\n\
 \n\
-# 等待lidar节点先启动\n\
+# 等待localization节点启动\n\
+sleep 2\n\
+\n\
+# 启动lidar_reflector_target_tracker节点（目标跟踪）\n\
+echo "Starting lidar_reflector_target_tracker..."\n\
+roslaunch --wait lidar_reflector_target_tracker tracker.launch &\n\
+TRACKER_PID=$!\n\
+\n\
+# 等待tracker节点启动\n\
 sleep 2\n\
 \n\
 # 启动heading_estimation节点\n\
@@ -350,7 +361,8 @@ HEADING_PID=$!\n\
 \n\
 # 等待所有节点\n\
 wait $TIMOO_PID\n\
-wait $LIDAR_PID\n\
+wait $LOCALIZATION_PID\n\
+wait $TRACKER_PID\n\
 wait $HEADING_PID\n\
 ' > /start_nodes.sh && \
 chmod +x /start_nodes.sh

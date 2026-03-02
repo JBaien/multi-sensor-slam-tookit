@@ -32,10 +32,41 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # 激光雷达目标检测服务
-  lidar-target:
+  # 激光雷达目标定位服务
+  lidar-localization:
     image: lidar-heading-app:latest
-    container_name: lidar_target_container
+    container_name: lidar_localization_container
+    platform: linux/arm64
+    network_mode: host
+    privileged: true
+    environment:
+      - ROS_MASTER_URI=http://localhost:11311
+      - ROS_IP=127.0.0.1
+      - LANG=zh_CN.UTF-8
+      - LC_ALL=zh_CN.UTF-8
+      - TZ=Asia/Shanghai
+    volumes:
+      - ../data:/ros_ws/data:rw
+      - ./configs:/ros_ws/configs:rw
+    command: >
+      bash -c "
+        source /opt/ros/noetic/setup.bash &&
+        source /opt/catkin_ws/install/setup.bash &&
+        roslaunch lidar_target_localization target_localization.launch
+      "
+    restart: unless-stopped
+    depends_on:
+      - timoo-lidar
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 激光雷达目标跟踪服务
+  lidar-tracker:
+    image: lidar-heading-app:latest
+    container_name: lidar_tracker_container
     platform: linux/arm64
     network_mode: host
     privileged: true
@@ -54,11 +85,11 @@ services:
       bash -c "
         source /opt/ros/noetic/setup.bash &&
         source /opt/catkin_ws/install/setup.bash &&
-        roslaunch lidar_target_detection lidar_target_detector.launch
+        roslaunch lidar_reflector_target_tracker tracker.launch
       "
     restart: unless-stopped
     depends_on:
-      - timoo-lidar
+      - lidar-localization
     logging:
       driver: "json-file"
       options:
@@ -90,7 +121,7 @@ services:
       "
     restart: unless-stopped
     depends_on:
-      - timoo-lidar
+      - lidar-tracker
     logging:
       driver: "json-file"
       options:

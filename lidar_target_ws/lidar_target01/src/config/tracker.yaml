@@ -1,5 +1,5 @@
 # ========== 点云输入与强度过滤 ==========
-input_topic: "/lidar_points"       # 点云输入话题
+input_topic: "/timoo_points"       # 点云输入话题
 intensity_threshold: 150.0         # 强度阈值(>此值的点才保留)，增大过滤更严格，减小更宽松
 
 # ========== 高度过滤(z轴) ==========

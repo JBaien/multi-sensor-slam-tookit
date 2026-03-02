@@ -30,24 +30,28 @@ fi
 echo ""
 echo "请选择启动模式:"
 echo "1) 启动timoo激光雷达驱动"
-echo "2) 启动lidar_target_detector节点"
-echo "3) 启动heading_estimation节点"
-echo "4) 同时启动所有节点（timoo + lidar + heading）"
-echo "5) 进入容器bash交互模式"
-echo "6) 使用Docker Compose启动所有服务"
+echo "2) 启动lidar_target_localization节点(目标检测)"
+echo "3) 启动lidar_reflector_target_tracker节点(目标跟踪)"
+echo "4) 启动heading_estimation节点"
+echo "5) 同时启动所有节点(timoo + localization + tracker + heading)"
+echo "6) 进入容器bash交互模式"
+echo "7) 使用Docker Compose启动所有服务"
 echo ""
 
-read -p "请输入选项 (1-6): " choice
+read -p "请输入选项 (1-7): " choice
 
 # 询问是否后台运行
 BACKGROUND_MODE=""
-if [ "$choice" != "5" ] && [ "$choice" != "6" ]; then
+RESTART_FLAG=""
+if [ "$choice" != "6" ] && [ "$choice" != "7" ]; then
     read -p "是否后台运行? (y/N): " background_answer
     if [ "$background_answer" = "y" ] || [ "$background_answer" = "Y" ]; then
         BACKGROUND_MODE="-d"
+        RESTART_FLAG="--restart unless-stopped"
         echo -e "${YELLOW}将以后台模式启动容器${NC}"
     else
         BACKGROUND_MODE="--rm -it"
+        RESTART_FLAG=""
         echo -e "${YELLOW}将以交互模式启动容器${NC}"
     fi
 fi
@@ -61,7 +65,7 @@ case $choice in
             --name "${CONTAINER_NAME}-timoo" \
             --network host \
             --privileged \
-            --restart unless-stopped \
+            $RESTART_FLAG \
             -e LANG=zh_CN.UTF-8 \
             -e LC_ALL=zh_CN.UTF-8 \
             -v "$(dirname "$(pwd)")/data:/ros_ws/data" \
@@ -88,12 +92,12 @@ case $choice in
         fi
         ;;
     2)
-        echo -e "${YELLOW}启动lidar_target_detector节点...${NC}"
+        echo -e "${YELLOW}启动lidar_target_localization节点(目标检测)...${NC}"
         docker run $BACKGROUND_MODE \
-            --name "${CONTAINER_NAME}-lidar" \
+            --name "${CONTAINER_NAME}-localization" \
             --network host \
             --privileged \
-            --restart unless-stopped \
+            $RESTART_FLAG \
             -e LANG=zh_CN.UTF-8 \
             -e LC_ALL=zh_CN.UTF-8 \
             -v "$(pwd)/data:/ros_ws/data" \
@@ -104,7 +108,7 @@ case $choice in
                     export LC_ALL=zh_CN.UTF-8
                     source /opt/ros/noetic/setup.bash &&
                     source /opt/catkin_ws/install/setup.bash &&
-                    roslaunch lidar_target_detection lidar_target_detector.launch
+                    roslaunch lidar_target_localization target_localization.launch
                 else
                     echo 'ERROR: ROS not found in /opt/ros/noetic/'
                     echo 'Available content:'
@@ -114,17 +118,48 @@ case $choice in
             "
         if [ "$BACKGROUND_MODE" = "-d" ]; then
             echo -e "${GREEN}容器已在后台启动${NC}"
-            echo -e "${YELLOW}查看日志: docker logs -f ${CONTAINER_NAME}-lidar${NC}"
-            echo -e "${YELLOW}停止容器: docker stop ${CONTAINER_NAME}-lidar${NC}"
+            echo -e "${YELLOW}查看日志: docker logs -f ${CONTAINER_NAME}-localization${NC}"
+            echo -e "${YELLOW}停止容器: docker stop ${CONTAINER_NAME}-localization${NC}"
         fi
         ;;
     3)
+        echo -e "${YELLOW}启动lidar_reflector_target_tracker节点（目标跟踪）...${NC}"
+        docker run $BACKGROUND_MODE \
+            --name "${CONTAINER_NAME}-tracker" \
+            --network host \
+            --privileged \
+            $RESTART_FLAG \
+            -e LANG=zh_CN.UTF-8 \
+            -e LC_ALL=zh_CN.UTF-8 \
+            -v "$(pwd)/data:/ros_ws/data" \
+            "$IMAGE_NAME" \
+            bash -c "
+                if [ -f /opt/ros/noetic/setup.bash ]; then
+                    export LANG=zh_CN.UTF-8
+                    export LC_ALL=zh_CN.UTF-8
+                    source /opt/ros/noetic/setup.bash &&
+                    source /opt/catkin_ws/install/setup.bash &&
+                    roslaunch lidar_reflector_target_tracker tracker.launch
+                else
+                    echo 'ERROR: ROS not found in /opt/ros/noetic/'
+                    echo 'Available content:'
+                    ls -la /opt/
+                    exit 1
+                fi
+            "
+        if [ "$BACKGROUND_MODE" = "-d" ]; then
+            echo -e "${GREEN}容器已在后台启动${NC}"
+            echo -e "${YELLOW}查看日志: docker logs -f ${CONTAINER_NAME}-tracker${NC}"
+            echo -e "${YELLOW}停止容器: docker stop ${CONTAINER_NAME}-tracker${NC}"
+        fi
+        ;;
+    4)
         echo -e "${YELLOW}启动heading_estimation节点...${NC}"
         docker run $BACKGROUND_MODE \
             --name "${CONTAINER_NAME}-heading" \
             --network host \
             --privileged \
-            --restart unless-stopped \
+            $RESTART_FLAG \
             -e LANG=C.UTF-8 \
             -e LC_ALL=C.UTF-8 \
             -v "$(dirname "$(pwd)")/data:/ros_ws/data" \
@@ -149,7 +184,7 @@ case $choice in
             echo -e "${YELLOW}停止容器: docker stop ${CONTAINER_NAME}-heading${NC}"
         fi
         ;;
-    4)
+    5)
         echo -e "${YELLOW}同时启动所有节点...${NC}"
         read -p "请输入timoo雷达IP地址 [默认: 192.168.188.115]: " timoo_ip
         timoo_ip=${timoo_ip:-192.168.188.115}
@@ -157,7 +192,7 @@ case $choice in
             --name "$CONTAINER_NAME" \
             --network host \
             --privileged \
-            --restart unless-stopped \
+            $RESTART_FLAG \
             -e LANG=zh_CN.UTF-8 \
             -e LC_ALL=zh_CN.UTF-8 \
             -v "$(pwd)/data:/ros_ws/data" \
@@ -170,7 +205,7 @@ case $choice in
             echo -e "${YELLOW}停止容器: docker stop ${CONTAINER_NAME}${NC}"
         fi
         ;;
-    5)
+    6)
         echo -e "${YELLOW}进入容器交互模式...${NC}"
         docker run --rm -it \
             --name "${CONTAINER_NAME}-shell" \
@@ -180,7 +215,7 @@ case $choice in
             "$IMAGE_NAME" \
             bash
         ;;
-    6)
+    7)
         echo -e "${YELLOW}使用Docker Compose启动所有服务...${NC}"
         docker-compose up -d
         echo -e "${GREEN}容器已启动，查看日志: docker-compose logs -f${NC}"
