@@ -30,7 +30,7 @@ docker buildx build \
     --load \
     --progress=plain \
     --no-cache \
-    "$(pwd)/.."
+    "$(pwd)/../.."
 
 if [ $? -eq 0 ]; then
     echo ""
