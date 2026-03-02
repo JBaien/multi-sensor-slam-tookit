@@ -52,7 +52,7 @@ RUN pip3 install --no-cache-dir \
     catkin-pkg \
     rospkg \
     netifaces \
-    empy \
+    empy==3.3.4 \
     numpy
 
 # 添加ROS Noetic软件源（ARM64版本）
@@ -67,6 +67,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-rosdep \
     python3-catkin-tools \
     ros-noetic-roslint \
+    ros-noetic-tf \
+    ros-noetic-tf2-ros \
+    ros-noetic-tf2-geometry-msgs \
+    ros-noetic-pcl-ros \
+    ros-noetic-pcl-conversions \
+    ros-noetic-diagnostic-updater \
+    ros-noetic-angles \
     && rm -rf /var/lib/apt/lists/*
 
 # 初始化rosdep
@@ -76,19 +83,13 @@ RUN rosdep init && \
 # 安装项目依赖库（为 buildroot 环境优化，包含静态库）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libboost-all-dev \
-    libboost-system-dev \
-    libboost-filesystem-dev \
-    libboost-program-options-dev \
     libeigen3-dev \
-    libpcl-dev \
     libflann-dev \
     libvtk7-dev \
     libpcap-dev \
     libomp-dev \
     libyaml-cpp-dev \
     libqhull-dev \
-    libgomp1 \
-    libpthread-stubs0-dev \
     libssl-dev \
     zlib1g-dev \
     python3-vcstool \
@@ -99,17 +100,28 @@ RUN mkdir -p $CATKIN_WS/src
 
 # 复制源代码（构建上下文是项目根目录）
 COPY lidar_target_ws/lidar_target01/src $CATKIN_WS/src/lidar_reflector_target_tracker
-COPY lidar_target_ws/lidar_target02/src/lidar_target_localization $CATKIN_WS/src/lidar_target_localization
+COPY lidar_target_ws/lidar_target02/src $CATKIN_WS/src/lidar_target02
 COPY heading_ws/src $CATKIN_WS/src/heading_ws
 COPY timoo/src $CATKIN_WS/src/timoo
 
 # 编译工作空间（针对 buildroot 优化：静态链接部分库）
 WORKDIR $CATKIN_WS
+
+# 安装rosdep依赖
+RUN rosdep install --from-paths src --ignore-src -r -y
 RUN /bin/bash -c "source /opt/ros/\${ROS_DISTRO}/setup.bash && \
+    echo '=== Checking source code structure ===' && \
+    ls -la src/ && \
+    for pkg in src/*/; do \
+        echo \"Package: \$pkg\"; \
+        [ -f \"\$pkg/CMakeLists.txt\" ] && echo '  CMakeLists.txt found' || echo '  CMakeLists.txt NOT found!'; \
+        [ -f \"\$pkg/package.xml\" ] && echo '  package.xml found' || echo '  package.xml NOT found!'; \
+    done && \
+    echo '=== Starting catkin_make ===' && \
     catkin_make install -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_CXX_FLAGS='-O2 -march=armv8-a -fPIC' \
-        -DCMAKE_C_FLAGS='-O2 -march=armv8-a -fPIC' \
-        -DBUILD_SHARED_LIBS=ON"
+        -DCMAKE_CXX_FLAGS='-O2 -march=armv8-a' \
+        -DCMAKE_C_FLAGS='-O2 -march=armv8-a' 2>&1 || \
+    (cat build/CMakeFiles/CMakeError.log build/CMakeFiles/CMakeOutput.log 2>/dev/null; exit 1)"
 
 # ============================================
 # 第二阶段：运行时镜像（精简版，适配 buildroot）
@@ -172,13 +184,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgcc-s1 \
     && rm -rf /var/lib/apt/lists/*
 
-# 生成locale
-RUN locale-gen C.UTF-8 && \
-    dpkg-reconfigure -f noninteractive locales
+# C.UTF-8 是内置 locale，不需要生成
+# 验证 locale 可用性
+RUN locale -a | grep -i "C.UTF" || echo "C.UTF-8 already available"
 
 # 安装ROS Noetic运行时（精简版）
 RUN sh -c 'echo "deb http://mirrors.ustc.edu.cn/ros/ubuntu/ focal main" > /etc/apt/sources.list.d/ros-latest.list' && \
-    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys C1CF6E31E6BADE8868B172B4F42ED6FBAB17C654 && \
+    ( [ -n "$HTTP_PROXY" ] && echo "Acquire::http::Proxy \"$HTTP_PROXY\";" > /etc/apt/apt.conf.d/proxy.conf || true ) && \
+    ( [ -n "$HTTPS_PROXY" ] && echo "Acquire::https::Proxy \"$HTTPS_PROXY\";" >> /etc/apt/apt.conf.d/proxy.conf || true ) && \
+    apt-get install -y -qq wget ca-certificates && \
+    wget -qO- 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xC1CF6E31E6BADE8868B172B4F42ED6FBAB17C654' | apt-key add - && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
     ros-noetic-ros-base \

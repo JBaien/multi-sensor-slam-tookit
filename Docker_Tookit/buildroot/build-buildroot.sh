@@ -81,7 +81,7 @@ BUILD_ARGS="${BUILD_ARGS} --progress=plain"
 BUILD_ARGS="${BUILD_ARGS} -f ${DOCKERFILE_PATH}"
 
 # 执行构建
-docker buildx build ${BUILD_ARGS} -t ${REGISTRY}${IMAGE_NAME}:${IMAGE_TAG} ${BUILD_CONTEXT}
+docker buildx build ${BUILD_ARGS} --load -t ${REGISTRY}${IMAGE_NAME}:${IMAGE_TAG} ${BUILD_CONTEXT}
 
 if [ $? -eq 0 ]; then
     echo ""
