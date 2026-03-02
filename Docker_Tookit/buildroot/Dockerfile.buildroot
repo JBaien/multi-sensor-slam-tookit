@@ -1,0 +1,340 @@
+# ============================================
+# Dockerfile for Buildroot ARM64 Systems
+# Platform: Ubuntu 20.04 aarch64 (ARM64)
+# Target: Buildroot embedded Linux systems
+# Architecture: Native ARM64 build
+# ROS Version: Noetic (Python 3 compatible)
+# Features: Minimal dependencies, static linking support
+# ============================================
+
+# ============================================
+# 第一阶段：构建环境
+# ============================================
+FROM --platform=linux/arm64 ubuntu:20.04 AS builder
+
+# 代理配置
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY=localhost,127.0.0.1
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Asia/Shanghai \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    ROS_DISTRO=noetic \
+    CATKIN_WS=/opt/catkin_ws
+
+# 替换为国内 APT 源
+RUN sed -i 's|http://ports.ubuntu.com/ubuntu-ports|http://mirrors.aliyun.com/ubuntu-ports|g' /etc/apt/sources.list && \
+    sed -i 's|https://mirrors.aliyun.com/ubuntu-ports|http://mirrors.aliyun.com/ubuntu-ports|g' /etc/apt/sources.list
+
+# 安装基础工具和编译依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    curl \
+    gnupg2 \
+    lsb-release \
+    ca-certificates \
+    build-essential \
+    gcc \
+    g++ \
+    cmake \
+    git \
+    pkg-config \
+    python3 \
+    python3-pip \
+    python3-dev \
+    python3-setuptools \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装Python依赖
+RUN pip3 install --no-cache-dir \
+    catkin-pkg \
+    rospkg \
+    netifaces \
+    empy \
+    numpy
+
+# 添加ROS Noetic软件源（ARM64版本）
+RUN sh -c 'echo "deb http://mirrors.ustc.edu.cn/ros/ubuntu/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/ros-latest.list' && \
+    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys F42ED6FBAB17C654 && \
+    apt-get update
+
+# 安装ROS Noetic核心包和开发工具
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ros-noetic-ros-base \
+    ros-noetic-catkin \
+    python3-rosdep \
+    python3-catkin-tools \
+    ros-noetic-roslint \
+    && rm -rf /var/lib/apt/lists/*
+
+# 初始化rosdep
+RUN rosdep init && \
+    rosdep update --rosdistro $ROS_DISTRO
+
+# 安装项目依赖库（为 buildroot 环境优化，包含静态库）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libboost-all-dev \
+    libboost-system-dev \
+    libboost-filesystem-dev \
+    libboost-program-options-dev \
+    libeigen3-dev \
+    libpcl-dev \
+    libflann-dev \
+    libvtk7-dev \
+    libpcap-dev \
+    libomp-dev \
+    libyaml-cpp-dev \
+    libqhull-dev \
+    libgomp1 \
+    libpthread-stubs0-dev \
+    libssl-dev \
+    zlib1g-dev \
+    python3-vcstool \
+    && rm -rf /var/lib/apt/lists/*
+
+# 创建工作空间目录
+RUN mkdir -p $CATKIN_WS/src
+
+# 复制源代码（构建上下文是项目根目录）
+COPY lidar_target_ws/lidar_target01/src $CATKIN_WS/src/lidar_reflector_target_tracker
+COPY lidar_target_ws/lidar_target02/src/lidar_target_localization $CATKIN_WS/src/lidar_target_localization
+COPY heading_ws/src $CATKIN_WS/src/heading_ws
+COPY timoo/src $CATKIN_WS/src/timoo
+
+# 编译工作空间（针对 buildroot 优化：静态链接部分库）
+WORKDIR $CATKIN_WS
+RUN /bin/bash -c "source /opt/ros/\${ROS_DISTRO}/setup.bash && \
+    catkin_make install -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CXX_FLAGS='-O2 -march=armv8-a -fPIC' \
+        -DCMAKE_C_FLAGS='-O2 -march=armv8-a -fPIC' \
+        -DBUILD_SHARED_LIBS=ON"
+
+# ============================================
+# 第二阶段：运行时镜像（精简版，适配 buildroot）
+# ============================================
+FROM --platform=linux/arm64 ubuntu:20.04
+
+# 代理配置
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY=localhost,127.0.0.1
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Asia/Shanghai \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    ROS_DISTRO=noetic \
+    CATKIN_WS=/opt/catkin_ws \
+    LD_LIBRARY_PATH=/opt/catkin_ws/install/lib:$LD_LIBRARY_PATH
+
+# 设置时区
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# 替换为国内 APT 源
+RUN sed -i 's|http://ports.ubuntu.com/ubuntu-ports|http://mirrors.aliyun.com/ubuntu-ports|g' /etc/apt/sources.list && \
+    sed -i 's|https://mirrors.aliyun.com/ubuntu-ports|http://mirrors.aliyun.com/ubuntu-ports|g' /etc/apt/sources.list || \
+    (echo "deb http://mirrors.aliyun.com/ubuntu-ports focal main restricted universe multiverse" > /etc/apt/sources.list && \
+     echo "deb http://mirrors.aliyun.com/ubuntu-ports focal-updates main restricted universe multiverse" >> /etc/apt/sources.list && \
+     echo "deb http://mirrors.aliyun.com/ubuntu-ports focal-security main restricted universe multiverse" >> /etc/apt/sources.list)
+
+# 安装最小运行时依赖（为 buildroot 环境精简）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    gnupg2 \
+    lsb-release \
+    ca-certificates \
+    libboost-system1.71.0 \
+    libboost-filesystem1.71.0 \
+    libboost-program-options1.71.0 \
+    libboost-serialization1.71.0 \
+    libboost-thread1.71.0 \
+    libboost-chrono1.71.0 \
+    libboost-atomic1.71.0 \
+    libboost-date-time1.71.0 \
+    libboost-iostreams1.71.0 \
+    libeigen3-dev \
+    libpcl-dev \
+    libflann-dev \
+    libvtk7-dev \
+    libpcap0.8 \
+    libyaml-cpp-dev \
+    libomp-dev \
+    libssl-dev \
+    zlib1g-dev \
+    python3 \
+    python3-netifaces \
+    python3-yaml \
+    python3-rosdep \
+    locales \
+    libstdc++6 \
+    libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 生成locale
+RUN locale-gen C.UTF-8 && \
+    dpkg-reconfigure -f noninteractive locales
+
+# 安装ROS Noetic运行时（精简版）
+RUN sh -c 'echo "deb http://mirrors.ustc.edu.cn/ros/ubuntu/ focal main" > /etc/apt/sources.list.d/ros-latest.list' && \
+    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys C1CF6E31E6BADE8868B172B4F42ED6FBAB17C654 && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ros-noetic-ros-base \
+    ros-noetic-roscpp \
+    ros-noetic-rospy \
+    ros-noetic-sensor-msgs \
+    ros-noetic-geometry-msgs \
+    ros-noetic-std-msgs \
+    ros-noetic-pcl-ros \
+    ros-noetic-pcl-conversions \
+    ros-noetic-tf \
+    ros-noetic-tf2-ros \
+    ros-noetic-tf2-geometry-msgs \
+    ros-noetic-eigen-conversions \
+    ros-noetic-dynamic-reconfigure \
+    ros-noetic-diagnostic-updater \
+    ros-noetic-nodelet \
+    ros-noetic-message-runtime \
+    ros-noetic-angles \
+    ros-noetic-visualization-msgs \
+    -o Dpkg::Options::="--force-overwrite" && \
+    rm -rf /var/lib/apt/lists/*
+
+# 从编译阶段复制编译结果
+COPY --from=builder $CATKIN_WS $CATKIN_WS
+
+# 创建非root用户
+RUN useradd -m -s /bin/bash rosuser && \
+    chown -R rosuser:rosuser $CATKIN_WS
+
+# 配置环境变量脚本
+RUN echo '#!/bin/bash\n\
+export ROS_DISTRO=noetic\n\
+export CATKIN_WS=/opt/catkin_ws\n\
+export LD_LIBRARY_PATH=/opt/catkin_ws/install/lib:$LD_LIBRARY_PATH\n\
+\n\
+# 检查ROS是否已安装\n\
+if [ -f /opt/ros/$ROS_DISTRO/setup.bash ]; then\n\
+    source /opt/ros/$ROS_DISTRO/setup.bash\n\
+else\n\
+    echo "ERROR: /opt/ros/$ROS_DISTRO/setup.bash not found!"\n\
+    exit 1\n\
+fi\n\
+\n\
+# 检查catkin工作空间\n\
+if [ -f $CATKIN_WS/install/setup.bash ]; then\n\
+    source $CATKIN_WS/install/setup.bash\n\
+else\n\
+    echo "ERROR: $CATKIN_WS/install/setup.bash not found!"\n\
+    exit 1\n\
+fi\n\
+\n\
+# 显示系统信息\n\
+echo "========================================"\n\
+echo "ROS Environment Loaded"\n\
+echo "ROS_DISTRO: $ROS_DISTRO"\n\
+echo "CATKIN_WS: $CATKIN_WS"\n\
+echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"\n\
+echo "========================================"\n\
+\n\
+exec "$@"\n\
+' > /ros_entrypoint.sh && \
+chmod +x /ros_entrypoint.sh
+
+# 创建启动脚本（适用于 buildroot 环境）
+RUN echo '#!/bin/bash\n\
+# 加载ROS环境\n\
+source /opt/ros/noetic/setup.bash\n\
+source /opt/catkin_ws/install/setup.bash\n\
+\n\
+# 设置ROS环境变量\n\
+export ROS_MASTER_URI=${ROS_MASTER_URI:-http://localhost:11311}\n\
+export ROS_IP=${ROS_IP:-127.0.0.1}\n\
+\n\
+echo "========================================"\n\
+echo "Starting ROS Nodes on Buildroot System"\n\
+echo "ROS_MASTER_URI: $ROS_MASTER_URI"\n\
+echo "ROS_IP: $ROS_IP"\n\
+echo "========================================"\n\
+\n\
+# 启动rosmaster\n\
+echo "Starting rosmaster..."\n\
+roscore &\n\
+ROSCORE_PID=$!\n\
+\n\
+# 等待rosmaster启动\n\
+sleep 5\n\
+\n\
+# 启动timoo激光雷达驱动\n\
+echo "Starting timoo lidar driver..."\n\
+roslaunch --wait timoo_pointcloud TM16.launch device_ip:="${TIMOO_IP:-192.168.188.115}" &\n\
+TIMOO_PID=$!\n\
+\n\
+# 等待timoo驱动启动\n\
+sleep 5\n\
+\n\
+# 启动lidar_target_localization节点\n\
+echo "Starting lidar_target_localization..."\n\
+roslaunch --wait lidar_target_localization target_localization.launch &\n\
+LOCALIZATION_PID=$!\n\
+\n\
+# 等待localization节点启动\n\
+sleep 3\n\
+\n\
+# 启动lidar_reflector_target_tracker节点\n\
+echo "Starting lidar_reflector_target_tracker..."\n\
+roslaunch --wait lidar_reflector_target_tracker tracker.launch &\n\
+TRACKER_PID=$!\n\
+\n\
+# 等待tracker节点启动\n\
+sleep 3\n\
+\n\
+# 启动heading_estimation节点\n\
+echo "Starting heading_estimation..."\n\
+roslaunch --wait heading_estimation heading_estimation.launch &\n\
+HEADING_PID=$!\n\
+\n\
+echo "========================================"\n\
+echo "All nodes started successfully"\n\
+echo "========================================"\n\
+\n\
+# 等待所有节点\n\
+wait $TIMOO_PID\n\
+wait $LOCALIZATION_PID\n\
+wait $TRACKER_PID\n\
+wait $HEADING_PID\n\
+' > /start_nodes.sh && \
+chmod +x /start_nodes.sh
+
+# 创建用于 buildroot 的简化启动脚本
+RUN echo '#!/bin/bash\n\
+# 简化启动脚本，仅加载环境\n\
+source /opt/ros/noetic/setup.bash\n\
+source /opt/catkin_ws/install/setup.bash\n\
+export ROS_MASTER_URI=${ROS_MASTER_URI:-http://localhost:11311}\n\
+export ROS_IP=${ROS_IP:-127.0.0.1}\n\
+\n\
+echo "Buildroot ROS Environment Ready"\n\
+echo "ROS_MASTER_URI: $ROS_MASTER_URI"\n\
+echo "ROS_IP: $ROS_IP"\n\
+\n\
+# 如果有参数则执行，否则进入bash\n\
+if [ $# -gt 0 ]; then\n\
+    exec "$@"\n\
+else\n\
+    exec bash\n\
+fi\n\
+' > /start_simple.sh && \
+chmod +x /start_simple.sh
+
+# 切换到非root用户
+USER rosuser
+WORKDIR /home/rosuser
+
+# 设置入口点
+ENTRYPOINT ["/ros_entrypoint.sh"]
+
+# 默认启动bash
+CMD ["bash"]

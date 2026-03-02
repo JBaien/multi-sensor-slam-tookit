@@ -81,7 +81,7 @@ docker buildx build \
     --progress=plain \
     --build-arg HTTP_PROXY=http://192.168.117.1:7890 \
     --build-arg HTTPS_PROXY=http://192.168.117.1:7890 \
-    "$(pwd)/.."
+    "$(pwd)/../.."
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}========================================${NC}"

@@ -1,0 +1,152 @@
+version: '3.8'
+
+services:
+  # timoo激光雷达驱动服务
+  timoo-lidar:
+    image: lidar-heading-buildroot:latest
+    container_name: timoo_lidar_container
+    platform: linux/arm64
+    network_mode: host
+    privileged: true
+    environment:
+      - ROS_MASTER_URI=http://localhost:11311
+      - ROS_IP=127.0.0.1
+      - TIMOO_IP=${TIMOO_IP:-192.168.188.115}
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - TZ=Asia/Shanghai
+    volumes:
+      - ../data:/ros_ws/data:rw
+      - ./configs:/ros_ws/configs:rw
+    command: >
+      bash -c "
+        source /opt/ros/noetic/setup.bash &&
+        source /opt/catkin_ws/install/setup.bash &&
+        roslaunch timoo_pointcloud TM16.launch device_ip:=${TIMOO_IP}
+      "
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "rostopic list | grep -q /point_cloud || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # 激光雷达目标定位服务
+  lidar-localization:
+    image: lidar-heading-buildroot:latest
+    container_name: lidar_localization_container
+    platform: linux/arm64
+    network_mode: host
+    privileged: true
+    environment:
+      - ROS_MASTER_URI=http://localhost:11311
+      - ROS_IP=127.0.0.1
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - TZ=Asia/Shanghai
+    volumes:
+      - ../data:/ros_ws/data:rw
+      - ./configs:/ros_ws/configs:rw
+    command: >
+      bash -c "
+        source /opt/ros/noetic/setup.bash &&
+        source /opt/catkin_ws/install/setup.bash &&
+        roslaunch lidar_target_localization target_localization.launch
+      "
+    restart: unless-stopped
+    depends_on:
+      timoo-lidar:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "rostopic list | grep -q /target_detection || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # 激光雷达目标跟踪服务
+  lidar-tracker:
+    image: lidar-heading-buildroot:latest
+    container_name: lidar_tracker_container
+    platform: linux/arm64
+    network_mode: host
+    privileged: true
+    environment:
+      - ROS_MASTER_URI=http://localhost:11311
+      - ROS_IP=127.0.0.1
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - TZ=Asia/Shanghai
+    volumes:
+      - ../data:/ros_ws/data:rw
+      - ./configs:/ros_ws/configs:rw
+    command: >
+      bash -c "
+        source /opt/ros/noetic/setup.bash &&
+        source /opt/catkin_ws/install/setup.bash &&
+        roslaunch lidar_reflector_target_tracker tracker.launch
+      "
+    restart: unless-stopped
+    depends_on:
+      lidar-localization:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "rostopic list | grep -q /target_tracking || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # 姿态估计服务
+  heading-estimation:
+    image: lidar-heading-buildroot:latest
+    container_name: heading_estimation_container
+    platform: linux/arm64
+    network_mode: host
+    privileged: true
+    environment:
+      - ROS_MASTER_URI=http://localhost:11311
+      - ROS_IP=127.0.0.1
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - TZ=Asia/Shanghai
+    volumes:
+      - ../data:/ros_ws/data:rw
+      - ./configs:/ros_ws/configs:rw
+    command: >
+      bash -c "
+        source /opt/ros/noetic/setup.bash &&
+        source /opt/catkin_ws/install/setup.bash &&
+        roslaunch heading_estimation heading_estimation.launch
+      "
+    restart: unless-stopped
+    depends_on:
+      lidar-tracker:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "rostopic list | grep -q /heading_estimate || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

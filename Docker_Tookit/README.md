@@ -1,144 +1,157 @@
 # Docker 部署工具包
 
-本目录包含用于构建和部署 ROS 应用的 Docker 相关文件。
+本目录包含用于构建和部署 ROS 应用的 Docker 相关文件，支持 Ubuntu ARM64 和 Buildroot ARM64 两种部署目标。
 
 ## 目录结构
 
 ```
 Docker_Tookit/
-├── Dockerfile.cross-arch    # 跨架构 Dockerfile (x86_64 -> ARM64)
-├── docker-compose.yml        # Docker Compose 配置文件
-├── build-cross-arch.sh       # 跨架构镜像构建脚本
-├── rebuild-code.sh           # 快速重建脚本（仅重新编译代码）
-├── run-docker.sh            # Docker 容器启动脚本
-├── check-deployment.sh      # 部署环境检查脚本
-├── buildkitd.toml           # Docker Buildx 配置文件
-└── .dockerignore            # Docker 构建忽略文件
+├── ubuntu/                    # Ubuntu ARM64 系统部署文件
+│   ├── Dockerfile.cross-arch  # 跨架构 Dockerfile
+│   ├── docker-compose.yml     # Docker Compose 配置
+│   ├── build-cross-arch.sh    # 构建脚本
+│   ├── rebuild-code.sh        # 快速重建脚本
+│   ├── run-docker.sh          # 运行脚本
+│   └── README.md              # Ubuntu 部署说明
+│
+├── buildroot/                 # Buildroot ARM64 系统部署文件
+│   ├── Dockerfile.buildroot   # Buildroot 专用 Dockerfile
+│   ├── docker-compose.buildroot.yml  # Docker Compose 配置
+│   ├── build-buildroot.sh     # 构建脚本
+│   ├── run-buildroot.sh       # 单容器运行脚本
+│   ├── run-docker-compose-buildroot.sh  # Compose 管理脚本
+│   └── README.md              # Buildroot 部署说明
+│
+├── check-deployment.sh        # 部署环境检查脚本
+├── buildkitd.toml            # Docker Buildx 配置
+└── .dockerignore             # Docker 构建忽略文件
 ```
 
-## 使用说明
+## 选择合适的部署方案
 
-### 1. 环境检查
+### Ubuntu ARM64 系统
 
-在开始构建前，建议先检查部署环境：
+**适用场景**：
+- 标准 Ubuntu Server/Desktop 环境
+- 需要可视化工具支持
+- 开发和测试环境
+- 有充足存储空间（> 1GB）
 
+**使用方法**：
 ```bash
-cd Docker_Tookit
-./check-deployment.sh
+cd ubuntu
+./build-cross-arch.sh      # 构建镜像
+./run-docker.sh            # 或使用 docker-compose up -d
 ```
 
-### 2. 构建镜像
+详细说明见 [ubuntu/README.md](./ubuntu/README.md)
 
-从 Docker_Tookit 目录运行构建脚本：
+### Buildroot ARM64 系统
 
+**适用场景**：
+- Buildroot 嵌入式 Linux 系统
+- 资源受限的设备
+- 生产环境部署
+- 存储空间有限（< 1GB）
+
+**使用方法**：
 ```bash
-cd Docker_Tookit
-./build-cross-arch.sh
+cd buildroot
+./build-buildroot.sh       # 构建镜像
+./run-docker-compose-buildroot.sh up   # 或使用 ./run-buildroot.sh all
 ```
 
-这将构建一个 ARM64 架构的 Docker 镜像，可以在 ARM64 设备上运行。
+详细说明见 [buildroot/README.md](./buildroot/README.md)
 
-### 3. 快速重建（代码修改后）
+## 部署方案对比
 
-如果只是修改了源代码，可以使用快速重建：
+| 特性 | Ubuntu ARM64 | Buildroot ARM64 |
+|------|-------------|-----------------|
+| 镜像大小 | 较大 (~3GB) | 较小 (~1.5GB) |
+| 运行时依赖 | 完整依赖 | 精简依赖 |
+| 可视化支持 | 支持 | 不支持 |
+| 语言环境 | zh_CN.UTF-8 | C.UTF-8 |
+| 适用系统 | Ubuntu Server/Desktop | Buildroot 嵌入式系统 |
+| 资源占用 | 较高 | 较低 |
+| 开发工具 | 包含 | 不包含 |
+| 部署难度 | 较低 | 中等 |
 
-```bash
-cd Docker_Tookit
-./rebuild-code.sh
-```
+## 快速参考
 
-### 4. 运行容器
-
-#### 方式一：使用交互式脚本
-
-```bash
-cd Docker_Tookit
-./run-docker.sh
-```
-
-脚本提供以下选项：
-1. 启动 timoo 激光雷达驱动
-2. 启动 lidar_target_localization 节点（目标检测）
-3. 启动 lidar_reflector_target_tracker 节点（目标跟踪）
-4. 启动 heading_estimation 节点
-5. 同时启动所有节点（timoo + localization + tracker + heading）
-6. 进入容器 bash 交互模式
-7. 使用 Docker Compose 启动所有服务
-
-#### 方式二：使用 Docker Compose
+### Ubuntu ARM64
 
 ```bash
-cd Docker_Tookit
+# 构建镜像
+cd ubuntu && ./build-cross-arch.sh
+
+# 使用 Docker Compose 运行
 docker-compose up -d
-```
 
-查看日志：
-```bash
+# 查看日志
 docker-compose logs -f
-```
 
-停止服务：
-```bash
+# 停止服务
 docker-compose down
 ```
 
-### 5. 手动运行
+### Buildroot ARM64
 
 ```bash
-# 进入 Docker_Tookit 目录
-cd Docker_Tookit
+# 构建镜像
+cd buildroot && ./build-buildroot.sh
 
-# 运行单个服务
-docker run --rm -it \
-    --network host \
-    --privileged \
-    -v ../data:/ros_ws/data \
-    -e TIMOO_IP=192.168.188.115 \
-    lidar-heading-app:latest \
-    bash -c "source /opt/ros/noetic/setup.bash && source /opt/catkin_ws/install/setup.bash && roslaunch timoo_pointcloud TM16.launch"
+# 保存镜像
+docker save lidar-heading-buildroot:latest -o lidar-heading-buildroot.tar
+
+# 传输到设备
+scp lidar-heading-buildroot.tar user@device:/tmp/
+
+# 在设备上加载并运行
+ssh user@device
+docker load -i /tmp/lidar-heading-buildroot.tar
+./run-docker-compose-buildroot.sh up
 ```
 
-## 配置说明
+## 环境要求
 
-### 代理配置
+### 开发机（构建镜像）
 
-如果需要使用代理，请修改以下文件中的代理地址：
+- Docker 19.03+
+- Docker Buildx
+- 网络连接（下载依赖）
+- 足够的磁盘空间（> 10GB）
 
-- `build-cross-arch.sh` 中的 HTTP_PROXY 和 HTTPS_PROXY
-- `buildkitd.toml` 中的 DNS 配置
+### 目标设备（运行容器）
 
-### 环境变量
+- Docker 19.03+
+- ARM64 架构
+- 足够的内存（建议 2GB+）
+- 网络连接（访问激光雷达）
 
-在 `docker-compose.yml` 中可以配置：
+## 常见问题
 
-- `TIMOO_IP`: timoo 激光雷达的 IP 地址（默认: 192.168.188.115）
-- `ROS_MASTER_URI`: ROS Master URI
-- `ROS_IP`: ROS IP 地址
+### Q: 如何选择部署方案？
 
-### 数据目录
+A: 如果目标设备是 Ubuntu 系统，使用 ubuntu/ 目录下的文件；如果是 Buildroot 系统，使用 buildroot/ 目录下的文件。
 
-数据通过卷挂载映射到容器：
-- `../data`: 项目根目录的 data 文件夹映射到容器内的 `/ros_ws/data`
+### Q: 可以在 x86_64 设备上运行吗？
 
-## 路径说明
+A: 不可以。这些镜像都是为 ARM64 架构编译的。如果需要在 x86_64 上测试，需要修改 Dockerfile 中的平台参数。
 
-由于 Docker_Tookit 目录位于项目根目录下，所有路径引用已相应调整：
+### Q: Buildroot 版本可以可视化吗？
 
-- Docker 构建上下文：项目根目录（`..`）
-- 源代码路径：`../lidar_target_ws/lidar_target01/src`, `../lidar_target_ws/lidar_target02/src/lidar_target_localization`, `../heading_ws/src`, `../timoo/src`
-- 数据卷挂载：`../data`
+A: 不可以。Buildroot 版本移除了 X11 相关的依赖和挂载，以减小镜像体积。如果需要可视化，请使用 Ubuntu 版本。
 
-## 注意事项
+### Q: 如何更新代码？
 
-1. **脚本执行权限**：所有 `.sh` 脚本已设置可执行权限，如果遇到权限问题，运行：
-   ```bash
-   chmod +x *.sh
-   ```
+A: 修改源代码后，在开发机重新构建镜像，然后传输到目标设备加载。
 
-2. **跨平台构建**：本工具包支持从 x86_64 系统构建 ARM64 架构的镜像
+## 技术支持
 
-3. **依赖项**：确保已安装 Docker 和 Docker Buildx
+- Ubuntu 部署问题：查看 [ubuntu/README.md](./ubuntu/README.md)
+- Buildroot 部署问题：查看 [buildroot/README.md](./buildroot/README.md)
+- 通用问题：查看各目录下的 README.md 文档
 
-4. **网络模式**：使用 `--network host` 模式，容器与主机共享网络
+## 许可证
 
-5. **特权模式**：使用 `--privileged` 模式以支持硬件访问
+本项目遵循项目根目录下的许可证。
