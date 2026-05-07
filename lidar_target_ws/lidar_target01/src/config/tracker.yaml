@@ -13,13 +13,13 @@ r_max: 0.20                         # 最大半径(m)，范围过大可能匹配
 
 # ========== 聚类参数 ==========
 cluster_tolerance: 0.08             # 聚类距离容差(m)，增大会合并更多点，减小会分成更多簇
-min_cluster_size: 10                # 最小聚类点数，增大要求更严格，减小允许更少点
+min_cluster_size: 6                # 最小聚类点数，增大要求更严格，减小允许更少点
 max_cluster_size: 200               # 最大聚类点数，过滤掉过大的杂波簇
 
 # ========== RANSAC圆拟合参数 ==========
 ransac_iters: 400                   # RANSAC迭代次数，增大更精确但更慢
 circle_inlier_th: 0.03              # 圆内点阈值(m)，增大会接受更多点，减小要求更严格
-min_circle_inliers: 8               # 最小圆内点数，增大要求更高，减小更宽松
+min_circle_inliers: 3               # 最小圆内点数，增大要求更高，减小更宽松
 
 # ========== 跟踪与ROI参数 ==========
 enable_kf: true                     # 是否启用卡尔曼滤波跟踪

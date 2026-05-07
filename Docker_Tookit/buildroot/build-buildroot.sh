@@ -100,7 +100,7 @@ if [ $? -eq 0 ]; then
     echo ""
     echo "3. 运行容器:"
     echo "   docker run --rm -it --network host --privileged \\"
-    echo "       -e TIMOO_IP=192.168.188.115 \\"
+    echo "       -e TIMOO_IP=192.168.188.37 \\"
     echo "       ${REGISTRY}${IMAGE_NAME}:${IMAGE_TAG}"
     echo ""
 else

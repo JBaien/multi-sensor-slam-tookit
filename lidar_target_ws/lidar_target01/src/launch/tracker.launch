@@ -1,8 +1,10 @@
 <launch>
+  <arg name="input_topic" default="/timoo_points" />
   <node pkg="lidar_reflector_target_tracker"
         type="lidar_reflector_target_tracker_node"
         name="lidar_reflector_target_tracker"
         output="screen">
     <rosparam file="$(find lidar_reflector_target_tracker)/config/tracker.yaml" command="load"/>
+    <param name="input_topic" value="$(arg input_topic)" />
   </node>
 </launch>

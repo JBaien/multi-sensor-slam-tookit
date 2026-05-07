@@ -1,4 +1,6 @@
 <launch>
+  <arg name="lidar_topic" default="/timoo_points" />
+
   <node pkg="lidar_target_localization"
         type="target_detector"
         name="target_detector"
@@ -8,6 +10,6 @@
               command="load"/>
 
     <!-- 按需覆盖参数 -->
-    <!-- <param name="lidar_topic" value="/your_lidar_topic"/> -->
+    <param name="lidar_topic" value="$(arg lidar_topic)" />
   </node>
 </launch>

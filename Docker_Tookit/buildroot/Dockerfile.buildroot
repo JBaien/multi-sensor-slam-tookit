@@ -103,6 +103,7 @@ COPY lidar_target_ws/lidar_target01/src $CATKIN_WS/src/lidar_reflector_target_tr
 COPY lidar_target_ws/lidar_target02/src $CATKIN_WS/src/lidar_target02
 COPY heading_ws/src $CATKIN_WS/src/heading_ws
 COPY timoo/src $CATKIN_WS/src/timoo
+COPY tmlidar_ws/src $CATKIN_WS/src/tmlidar_ws
 
 # 编译工作空间（针对 buildroot 优化：静态链接部分库）
 WORKDIR $CATKIN_WS
@@ -157,6 +158,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg2 \
     lsb-release \
     ca-certificates \
+    vim \
     libboost-system1.71.0 \
     libboost-filesystem1.71.0 \
     libboost-program-options1.71.0 \
@@ -258,7 +260,7 @@ exec "$@"\n\
 ' > /ros_entrypoint.sh && \
 chmod +x /ros_entrypoint.sh
 
-# 创建启动脚本（适用于 buildroot 环境）
+# 创建启动脚本（适用于 buildroot 环境）- timoo 模式
 RUN echo '#!/bin/bash\n\
 # 加载ROS环境\n\
 source /opt/ros/noetic/setup.bash\n\
@@ -268,8 +270,11 @@ source /opt/catkin_ws/install/setup.bash\n\
 export ROS_MASTER_URI=${ROS_MASTER_URI:-http://localhost:11311}\n\
 export ROS_IP=${ROS_IP:-127.0.0.1}\n\
 \n\
+# 退出时清理所有子进程\n\
+trap "kill $(jobs -p) 2>/dev/null; exit" INT TERM EXIT\n\
+\n\
 echo "========================================"\n\
-echo "Starting ROS Nodes on Buildroot System"\n\
+echo "Starting ROS Nodes (TIMOO Mode)"\n\
 echo "ROS_MASTER_URI: $ROS_MASTER_URI"\n\
 echo "ROS_IP: $ROS_IP"\n\
 echo "========================================"\n\
@@ -284,7 +289,7 @@ sleep 5\n\
 \n\
 # 启动timoo激光雷达驱动\n\
 echo "Starting timoo lidar driver..."\n\
-roslaunch --wait timoo_pointcloud TM16.launch device_ip:="${TIMOO_IP:-192.168.188.115}" &\n\
+roslaunch --wait timoo_pointcloud TM16.launch device_ip:="${TIMOO_IP:-192.168.188.37}" &\n\
 TIMOO_PID=$!\n\
 \n\
 # 等待timoo驱动启动\n\
@@ -312,18 +317,141 @@ roslaunch --wait heading_estimation heading_estimation.launch &\n\
 HEADING_PID=$!\n\
 \n\
 echo "========================================"\n\
-echo "All nodes started successfully"\n\
+echo "All nodes started successfully (TIMOO Mode)"\n\
 echo "========================================"\n\
 \n\
-# 等待所有节点\n\
-wait $TIMOO_PID\n\
-wait $LOCALIZATION_PID\n\
-wait $TRACKER_PID\n\
-wait $HEADING_PID\n\
+# 持续运行，监控所有节点\n\
+while true; do\n\
+    # 检查 roscore 是否还在运行\n\
+    if ! kill -0 $ROSCORE_PID 2>/dev/null; then\n\
+        echo "ERROR: roscore died, restarting..."\n\
+        roscore &\n\
+        ROSCORE_PID=$!\n\
+        sleep 5\n\
+        continue\n\
+    fi\n\
+    \n\
+    # 检查各个节点是否还在运行\n\
+    for node_pid in $TIMOO_PID $LOCALIZATION_PID $TRACKER_PID $HEADING_PID; do\n\
+        if ! kill -0 $node_pid 2>/dev/null; then\n\
+            echo "ERROR: Node with PID $node_pid died, exiting..."\n\
+            exit 1\n\
+        fi\n\
+    done\n\
+    \n\
+    sleep 1\n\
+done\n\
+' > /start_nodes_timoo.sh && \
+chmod +x /start_nodes_timoo.sh
+
+# 创建启动脚本（适用于 buildroot 环境）- tmlidar_ws 模式
+RUN echo '#!/bin/bash\n\
+# 加载ROS环境\n\
+source /opt/ros/noetic/setup.bash\n\
+source /opt/catkin_ws/install/setup.bash\n\
+\n\
+# 设置ROS环境变量\n\
+export ROS_MASTER_URI=${ROS_MASTER_URI:-http://localhost:11311}\n\
+export ROS_IP=${ROS_IP:-127.0.0.1}\n\
+\n\
+# 退出时清理所有子进程\n\
+trap "kill $(jobs -p) 2>/dev/null; exit" INT TERM EXIT\n\
+\n\
+echo "========================================"\n\
+echo "Starting ROS Nodes (TMLIDAR Mode)"\n\
+echo "ROS_MASTER_URI: $ROS_MASTER_URI"\n\
+echo "ROS_IP: $ROS_IP"\n\
+echo "========================================"\n\
+\n\
+# 启动rosmaster\n\
+echo "Starting rosmaster..."\n\
+roscore &\n\
+ROSCORE_PID=$!\n\
+\n\
+# 等待rosmaster启动\n\
+sleep 5\n\
+\n\
+# 启动tmlidar激光雷达驱动\n\
+echo "Starting tmlidar driver..."\n\
+roslaunch --wait lidar_pointcloud scan.launch device_ip:="${TMLIDAR_IP:-192.168.188.115}" &\n\
+TMLIDAR_PID=$!\n\
+\n\
+# 等待tmlidar驱动启动\n\
+sleep 5\n\
+\n\
+# 启动lidar_target_localization节点\n\
+echo "Starting lidar_target_localization..."\n\
+roslaunch --wait lidar_target_localization target_localization.launch lidar_topic:=/lidar_points &\n\
+LOCALIZATION_PID=$!\n\
+\n\
+# 等待localization节点启动\n\
+sleep 3\n\
+\n\
+# 启动lidar_reflector_target_tracker节点\n\
+echo "Starting lidar_reflector_target_tracker..."\n\
+roslaunch --wait lidar_reflector_target_tracker tracker.launch input_topic:=/lidar_points &\n\
+TRACKER_PID=$!\n\
+\n\
+# 等待tracker节点启动\n\
+sleep 3\n\
+\n\
+# 启动heading_estimation节点\n\
+echo "Starting heading_estimation..."\n\
+roslaunch --wait heading_estimation heading_estimation.launch pointcloud_topic:=/lidar_points lidar_frame:=lidar_sensor base_frame:=lidar_sensor &\n\
+HEADING_PID=$!\n\
+\n\
+echo "========================================"\n\
+echo "All nodes started successfully (TMLIDAR Mode)"\n\
+echo "========================================"\n\
+\n\
+# 持续运行，监控所有节点\n\
+while true; do\n\
+    # 检查 roscore 是否还在运行\n\
+    if ! kill -0 $ROSCORE_PID 2>/dev/null; then\n\
+        echo "ERROR: roscore died, restarting..."\n\
+        roscore &\n\
+        ROSCORE_PID=$!\n\
+        sleep 5\n\
+        continue\n\
+    fi\n\
+    \n\
+    # 检查各个节点是否还在运行\n\
+    for node_pid in $TMLIDAR_PID $LOCALIZATION_PID $TRACKER_PID $HEADING_PID; do\n\
+        if ! kill -0 $node_pid 2>/dev/null; then\n\
+            echo "ERROR: Node with PID $node_pid died, exiting..."\n\
+            exit 1\n\
+        fi\n\
+    done\n\
+    \n\
+    sleep 1\n\
+done\n\
+' > /start_nodes_tmlidar.sh && \
+chmod +x /start_nodes_tmlidar.sh
+
+# 创建用于 buildroot 的简化启动脚本（用于记忆上次选择的模式）
+RUN echo '#!/bin/bash\n\
+# 检查上次选择的模式\n\
+MODE_FILE=/tmp/lidar_mode\n\
+START_SCRIPT="/start_nodes_timoo.sh"\n\
+\n\
+if [ -f "$MODE_FILE" ]; then\n\
+    SAVED_MODE=$(cat "$MODE_FILE")\n\
+    echo "Found saved mode: $SAVED_MODE"\n\
+    if [ "$SAVED_MODE" = "tmlidar" ]; then\n\
+        START_SCRIPT="/start_nodes_tmlidar.sh"\n\
+        echo "Using TMLIDAR mode from last run"\n\
+    else\n\
+        echo "Using TIMOO mode from last run"\n\
+    fi\n\
+else\n\
+    # 默认使用 timoo 模式\n\
+    echo "No saved mode found, using default: timoo"\n\
+fi\n\
+\n\
+# 执行对应的启动脚本\n\
+exec "$START_SCRIPT"\n\
 ' > /start_nodes.sh && \
 chmod +x /start_nodes.sh
-
-# 创建用于 buildroot 的简化启动脚本
 RUN echo '#!/bin/bash\n\
 # 简化启动脚本，仅加载环境\n\
 source /opt/ros/noetic/setup.bash\n\
@@ -351,5 +479,5 @@ WORKDIR /home/rosuser
 # 设置入口点
 ENTRYPOINT ["/ros_entrypoint.sh"]
 
-# 默认启动bash
-CMD ["bash"]
+# 默认启动 /start_nodes.sh（会根据挂载的 /tmp/lidar_mode 自动选择模式）
+CMD ["/start_nodes.sh"]
