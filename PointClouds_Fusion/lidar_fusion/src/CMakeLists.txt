@@ -73,6 +73,7 @@ add_definitions(${PCL_DEFINITIONS})
 ## 声明C++库
 add_library(${PROJECT_NAME}
   src/lidar_fusion.cpp
+  src/multi_lidar_fusion.cpp
 )
 
 ## 添加cmake目标依赖，确保在编译这个库之前消息被生成
@@ -87,15 +88,24 @@ target_link_libraries(${PROJECT_NAME}
 
 ## 声明C++可执行文件
 add_executable(${PROJECT_NAME}_node src/lidar_fusion_node.cpp)
+add_executable(multi_lidar_fusion_node src/multi_lidar_fusion_node.cpp)
 
 ## 重命名C++可执行文件（可选）
 set_target_properties(${PROJECT_NAME}_node PROPERTIES OUTPUT_NAME lidar_fusion_node PREFIX "")
 
 ## 添加cmake目标依赖，确保在编译这个可执行文件之前消息和动态重配置文件被生成
 add_dependencies(${PROJECT_NAME}_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(multi_lidar_fusion_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 ## 指定可执行文件的链接库
 target_link_libraries(${PROJECT_NAME}_node
+  ${PROJECT_NAME}
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${Boost_LIBRARIES}
+)
+
+target_link_libraries(multi_lidar_fusion_node
   ${PROJECT_NAME}
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
@@ -107,7 +117,7 @@ target_link_libraries(${PROJECT_NAME}_node
 #############
 
 # 标记要安装的可执行文件和/或库
-install(TARGETS ${PROJECT_NAME} ${PROJECT_NAME}_node
+install(TARGETS ${PROJECT_NAME} ${PROJECT_NAME}_node multi_lidar_fusion_node
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
@@ -124,6 +134,11 @@ install(DIRECTORY include/${PROJECT_NAME}/
 install(DIRECTORY launch/
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
   FILES_MATCHING PATTERN "*.launch"
+)
+
+install(DIRECTORY config/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
+  FILES_MATCHING PATTERN "*.yaml"
 )
 
 #############
